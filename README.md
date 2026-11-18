@@ -1,5 +1,28 @@
 # Arch Control Center
 
+## ⬇️ Скачать и запустить
+
+> [!TIP]
+> Один блок ставит зависимости, клонирует репозиторий, собирает релиз и запускает демо.
+> Пока [пул-реквест](https://github.com/levks787-star/cyber_Ui_Arch/pull/1) не влит в `main`, клонируется ветка `cursor/arch-control-center-dbfc`. После слияния уберите `-b cursor/arch-control-center-dbfc` и клонируйте `main`.
+
+```bash
+sudo pacman -S --needed base-devel git rustup pkgconf mesa libxkbcommon wayland alsa-lib
+rustup default stable
+git clone -b cursor/arch-control-center-dbfc https://github.com/levks787-star/cyber_Ui_Arch.git
+# после слияния в main:
+# git clone https://github.com/levks787-star/cyber_Ui_Arch.git
+cd cyber_Ui_Arch
+cargo build --release
+./target/release/arch-control-center --demo
+```
+
+Обновить уже склонированную копию и пересобрать:
+
+```bash
+git pull && cargo build --release
+```
+
 Бета трёхмерного центра управления для Arch Linux: плотная панель из нумерованных плиток, которую можно свободно крутить в пространстве. Наведение выдвигает плитку к камере и размывает остальные. Неон, тонкая линейная графика, живые графики.
 
 ![Сетка плиток](docs/screenshots/01-orbit.png)
