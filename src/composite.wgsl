@@ -1,5 +1,6 @@
 struct CompU {
     params: vec4<f32>,
+    extra: vec4<f32>,
 }
 
 struct FullVs {
@@ -28,19 +29,22 @@ fn vs_full(@builtin(vertex_index) vid: u32) -> FullVs {
 @group(0) @binding(4) var bloom_samp: sampler;
 @group(0) @binding(5) var hud_tex: texture_2d<f32>;
 @group(0) @binding(6) var hud_samp: sampler;
+@group(0) @binding(7) var frost_tex: texture_2d<f32>;
+@group(0) @binding(8) var frost_samp: sampler;
 
 @fragment
 fn fs_composite(in: FullVs) -> @location(0) vec4<f32> {
     let scene = textureSample(src_tex, src_samp, in.uv);
+    let soft = textureSample(frost_tex, frost_samp, in.uv);
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv);
-    var rgb = scene.rgb + bloom.rgb * comp.params.z;
+    var rgb = mix(scene.rgb, soft.rgb, comp.extra.x) + bloom.rgb * comp.params.z;
     let vig = length(in.uv - vec2<f32>(0.5, 0.5));
     rgb *= mix(1.0, 0.62, smoothstep(0.28, 0.95, vig));
     let scan = 1.0 - 0.035 * step(0.65, fract(in.pos.y * 0.35));
     rgb *= scan;
     let hud = textureSample(hud_tex, hud_samp, in.uv);
     rgb = mix(rgb, hud.rgb, hud.a);
-    rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * comp.params.x;
     let intro = comp.params.x;
     let overlay = comp.params.y;
     let veil = 0.48 * overlay * intro;

@@ -17,6 +17,8 @@ cargo build --release
 ./target/release/arch-control-center --demo
 ```
 
+По умолчанию процесс сразу отцепляется от терминала: оболочка возвращается, окно терминала можно закрыть. Лог пишется в `~/.cache/arch-control-center/log.txt` (или `$XDG_CACHE_HOME/arch-control-center/log.txt`). Чтобы видеть вывод в этом же терминале: `--foreground` или `-f`.
+
 Обновить уже склонированную копию и пересобрать:
 
 ```bash
@@ -43,12 +45,14 @@ sudo pacman -S --needed base-devel rustup pkgconf mesa libxkbcommon wayland alsa
 # На Debian/Ubuntu отдельно: libxkbcommon-x11-0 libxkbcommon-dev
 ```
 
-Для аппаратного Vulkan — драйвер видеокарты, для виртуалки без GPU — программный растеризатор:
+Для аппаратного Vulkan — загрузчик ICD и драйвер видеокарты. Приложение само **не** подменяет `VK_ICD_FILENAMES`, если переменная уже задана, и не переключает NVIDIA/AMD/Intel на lavapipe только из‑за отсутствия `/dev/dri/card0`.
 
 ```bash
+sudo pacman -S vulkan-icd-loader
+sudo pacman -S nvidia-utils    # NVIDIA, в том числе RTX 2060 и nvidia-open
 sudo pacman -S vulkan-radeon   # AMD
 sudo pacman -S vulkan-intel    # Intel
-sudo pacman -S vulkan-swrast   # lavapipe, VM / без /dev/dri
+sudo pacman -S vulkan-swrast   # lavapipe, только VM / нет /dev/dri
 ```
 
 Необязательные сервисы. Без них плитка показывает `UNAVAILABLE`, приложение не падает:
@@ -66,13 +70,16 @@ sudo pacman -S networkmanager bluez bluez-utils pipewire wireplumber \
 sudo apt install mesa-vulkan-drivers vulkan-tools libxkbcommon-dev pkg-config
 ```
 
-Если Vulkan не находится, перед запуском:
+Явный выбор бэкенда, если автоопределение ошиблось:
 
 ```bash
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+./target/release/arch-control-center --backend vulkan --demo
+./target/release/arch-control-center --backend gl --demo
+./target/release/arch-control-center --software --demo
+# то же через окружение: ACC_BACKEND=vulkan ACC_SOFTWARE=1 WGPU_BACKEND=gl
 ```
 
-Приложение само переключается на lavapipe, если нет `/dev/dri/card0`.
+`--software` включает lavapipe только если есть файл `/usr/share/vulkan/icd.d/lvp_icd.json` и вы сами не задали `VK_ICD_FILENAMES`. На RTX оставьте переменную пустой: загрузчик сам берёт `nvidia_icd.json`.
 
 ## Сборка и запуск
 
@@ -114,7 +121,7 @@ windowrulev2 = noanim, class:^(arch-control-center)$
 windowrulev2 = pin, class:^(arch-control-center)$
 ```
 
-`noanim` отключает анимацию самого Hyprland: появление и уход рисует приложение. Окно — обычный toplevel (winit), не слой `zwlr_layer_shell`, поэтому `layerrule` на него не вешается. Размытие рабочего стола за полупрозрачным окном включает общий blur:
+`exec` у Hyprland и так запускает программу без терминала. Если открыть бинарник из shell, он сам уходит в фон; для отладки добавьте `--foreground`. `noanim` отключает анимацию самого Hyprland: появление и уход рисует приложение. Окно — обычный toplevel (winit), не слой `zwlr_layer_shell`, поэтому `layerrule` на него не вешается. Размытие рабочего стола за полупрозрачным окном включает общий blur:
 
 ```
 decoration {
@@ -133,20 +140,49 @@ decoration {
 layerrule = blur, ^(arch-control-center)$
 ```
 
+## Запуск из меню
+
+Файл `assets/arch-control-center.desktop` с `Terminal=false`. rofi, wofi и другие лаунчеры открывают панель без консоли. Класс окна тот же, `arch-control-center`, поэтому правило Hyprland выше продолжает работать.
+
+```bash
+install -Dm755 target/release/arch-control-center ~/.local/bin/arch-control-center
+install -Dm644 assets/arch-control-center.desktop ~/.local/share/applications/arch-control-center.desktop
+update-desktop-database ~/.local/share/applications || true
+```
+
+`~/.local/bin` должен быть в `PATH`. В `Exec` можно дописать `--demo` или `--overlay`. Живые датчики — строка `Exec=arch-control-center` как в файле.
+
 ## Управление
+
+Камера как в Scene View Unity: рысканье вокруг вертикали мира, тангаж с ограничением, без накопления крена. Все движения сглаживаются критически затухающей пружиной и не зависят от частоты кадров. Крен по всем осям остаётся отдельным жестом.
 
 | Ввод | Действие |
 | --- | --- |
-| Перетаскивание ЛКМ | Вращение по всем осям (трекбол) с инерцией |
-| Колёсико | Приближение и отдаление |
-| Перетаскивание ПКМ или СКМ | Панорама |
-| Наведение | Плитка выезжает вперёд, растёт и ярче; остальные размываются и темнеют |
+| Alt+ЛКМ, или ЛКМ по пустому месту | Орбита вокруг точки (рысканье и тангаж). ЛКМ по тумблеру или ползунку их нажимает, а не крутит камеру |
+| Ctrl+ЛКМ | Крен вокруг оси взгляда |
+| Перетаскивание СКМ | Панорама |
+| Alt+ПКМ или Alt+колёсико | Наезд к точке орбиты |
+| Колёсико | Зум к курсору |
+| Удержание ПКМ | Полёт: WASD, Q/E вниз/вверх, Shift быстрее, мышь — взгляд |
+| `F` | Вписать наведённую плитку или всю сетку |
+| Наведение | Плитка выезжает вперёд; фон за ней размывается одним проходом |
 | Клик по тумблеру / ползунку | Wi-Fi, Bluetooth, громкость, яркость, DND, ночной свет, профиль питания |
 | `R` или кнопка RESET | Плавно вернуть камеру |
 | `1`–`5` | Темы Neon, Acid, Ice, Blood, Mono |
 | `6` | Свой акцент (ползунок HUE справа сверху) |
 | `M` или кнопка SND | Звук интерфейса вкл/выкл |
+| `F3` | Счётчик FPS |
 | `Esc` | Выход. В оверлее — плавное закрытие |
+
+Качество картинки: `--quality low`, `medium` или `high` (по умолчанию `high`). От него зависят размер размытия, число проходов, bloom и MSAA.
+
+| | Размытие | Проходы | Bloom | MSAA |
+| --- | --- | --- | --- | --- |
+| low | 1/8 кадра | 2 | нет | 1 |
+| medium | 1/4 | 3 | да | 1 |
+| high | 1/2 | 4 | да | 4 |
+
+Размытие — один уменьшенный проход (сэмпл окрестности, затем разделимый гаусс) на всю сцену за кадр, не ядро на каждую плитку. Содержимое плиток кэшируется в текстуры и перерисовывается, когда меняются данные: графики около 15 Гц, часы раз в секунду. Опрос sysinfo, D-Bus и внешние команды (`wpctl`, `journalctl`, `brightnessctl`) идут в фоновом потоке. Кадр показывается в режиме Mailbox, если он есть, иначе Fifo. В логе старта строка адаптера: имя, бэкенд, тип устройства. На RTX это должна быть NVIDIA, не llvmpipe и не запасной GL.
 
 Углы плиток, кнопок, тумблеров, образцов тем, ползунка HUE и RESET слегка скруглены. У каждого из них тонкая обводка цвета акцента. Фон под наведённой плиткой — матовое стекло: мягкое размытие, лёгкое зерно и приглушение цвета.
 
@@ -183,12 +219,45 @@ overlay = false
 - Если сервиса нет — подпись `UNAVAILABLE` и текст причины. `--demo` рисует полный набор и даёт кликать тумблеры локально.
 - Звук интерфейса: свой синтез на `rodio`, не блокирует кадр. Нет устройства — тишина. `M` или кнопка `SND` и поля `sound` / `sound_volume` в конфиге.
 
+## Если не находится GPU
+
+В логе при старте печатаются узлы `/dev/dri`, какие ICD лежат в `/usr/share/vulkan/icd.d`, и каждый адаптер, который увидел wgpu. Сначала пробуется Vulkan (предпочтение дискретной карте, для RTX 2060 это NVIDIA), затем OpenGL. Прозрачное окно оверлея, из‑за которого EGL на Wayland пишет `No config found`, пробуется отдельно и при неудаче открывается снова уже без прозрачности.
+
+NVIDIA (проприетарный драйвер и `nvidia-open`), Hyprland, Wayland:
+
+```bash
+sudo pacman -S nvidia-utils vulkan-icd-loader
+# модуль ядра должен отдавать DRM KMS, иначе Wayland не получит устройство:
+# nvidia_drm.modeset=1
+ls /usr/share/vulkan/icd.d/nvidia_icd.json
+vulkaninfo --summary
+```
+
+Не задавайте `VK_ICD_FILENAMES`, если хотите обычный драйвер NVIDIA. Приложение не перезаписывает эту переменную, когда она уже есть в окружении, и не подставляет lavapipe только потому, что нет файла `/dev/dri/card0` (часто есть `card1` или только `renderD128`).
+
+AMD и Intel:
+
+```bash
+sudo pacman -S vulkan-icd-loader vulkan-radeon   # AMD
+sudo pacman -S vulkan-icd-loader vulkan-intel    # Intel
+vulkaninfo --summary
+```
+
+Виртуалка без `/dev/dri`:
+
+```bash
+sudo pacman -S vulkan-icd-loader vulkan-swrast
+./target/release/arch-control-center --software --demo
+```
+
+Если прозрачный оверлей на Wayland всё же не стартует, окно откроется без прозрачности (рабочий стол за ним не будет виден, панель останется). Явный бэкенд: `--backend vulkan` или `--backend gl`.
+
 ## Известные ограничения
 
 - Обратная сторона плиток зеркалит текст: грани не отсекаются, чтобы панель была видна при полном обороте.
 - Волна на плитке AUDIO — визуализация уровня, не захват микрофона.
-- Lavapipe (софт) на большом окне даёт низкий FPS; для записи удобнее окно 1440×900.
-- Bloom и размытие считаются на GPU. На слабом софте картинка верная, но «тяжёлая».
+- На lavapipe (эта VM без NVIDIA) вертикальная синхронизация Fifo держит частоту около обновления экрана, а MSAA 4 в `--quality high` заметно тяжелее, чем на RTX 2060. Для слабого GPU есть `--quality low`.
+- Bloom и матовое размытие считаются на GPU одним уменьшенным проходом на кадр.
 - PKGBUILD и часть плиток с концепта (контейнеры, firewall, updates, scatter) — TODO.
 - Ночной свет и DND зависят от установленных утилит; отдельного портала GNOME в этой бете нет.
 

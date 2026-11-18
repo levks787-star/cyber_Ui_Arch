@@ -35,6 +35,16 @@ impl SystemHandle {
         self.snap.lock().expect("snapshot").clone()
     }
 
+    /// Copy the latest sample only when the background thread published a new one.
+    pub fn copy_if_newer(&self, dest: &mut Snapshot) -> bool {
+        let guard = self.snap.lock().expect("snapshot");
+        if guard.generation == dest.generation && dest.generation != 0 {
+            return false;
+        }
+        *dest = guard.clone();
+        true
+    }
+
     pub fn send(&self, cmd: Command) {
         let _ = self.tx.send(cmd);
     }
@@ -219,7 +229,7 @@ fn demo_loop(rx: Receiver<Command>, slot: Arc<Mutex<Snapshot>>) {
         let shift = (t as usize / 3) % logs.len();
         snap.log_lines = (0..6).map(|i| logs[(shift + i) % logs.len()].into()).collect();
         publish(&slot, snap, &mut generation);
-        thread::sleep(Duration::from_millis(220));
+        thread::sleep(Duration::from_millis(60));
     }
 }
 
@@ -299,8 +309,8 @@ fn live_loop(rx: Receiver<Command>, slot: Arc<Mutex<Snapshot>>) {
         let snap = sample_fast(&mut live);
         publish(&slot, snap, &mut generation);
         let spent = tick.elapsed();
-        if spent < Duration::from_millis(280) {
-            thread::sleep(Duration::from_millis(280) - spent);
+        if spent < Duration::from_millis(70) {
+            thread::sleep(Duration::from_millis(70) - spent);
         }
     }
 }

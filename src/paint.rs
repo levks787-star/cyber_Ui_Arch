@@ -419,66 +419,6 @@ fn round_rect(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
     pb.finish()
 }
 
-/// Two box passes via prefix sums. Soft and even, and the radius does not change the cost.
-pub fn blur_rgba(buf: &mut [u8], scratch: &mut Vec<u8>, w: u32, h: u32, radius: i32) {
-    let w = w as usize;
-    let h = h as usize;
-    let r = radius.max(0) as usize;
-    let n = w.saturating_mul(h).saturating_mul(4);
-    if r == 0 || buf.len() < n || w == 0 || h == 0 {
-        return;
-    }
-    scratch.resize(n, 0);
-    for _ in 0..2 {
-        box_axis(buf, scratch, w, h, r, true);
-        box_axis(scratch, buf, w, h, r, false);
-    }
-}
-
-fn box_axis(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
-    if horizontal {
-        let mut prefix = vec![[0u32; 4]; w + 1];
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) * 4;
-                for c in 0..4 {
-                    prefix[x + 1][c] = prefix[x][c] + src[i + c] as u32;
-                }
-            }
-            for x in 0..w {
-                let a = (x as i32 - r as i32).clamp(0, w as i32 - 1) as usize;
-                let b = (x as i32 + r as i32).clamp(0, w as i32 - 1) as usize;
-                let count = (b - a + 1) as u32;
-                let o = (y * w + x) * 4;
-                for c in 0..4 {
-                    dst[o + c] = ((prefix[b + 1][c] - prefix[a][c]) / count) as u8;
-                }
-            }
-            prefix[0] = [0; 4];
-        }
-    } else {
-        let mut prefix = vec![[0u32; 4]; h + 1];
-        for x in 0..w {
-            for y in 0..h {
-                let i = (y * w + x) * 4;
-                for c in 0..4 {
-                    prefix[y + 1][c] = prefix[y][c] + src[i + c] as u32;
-                }
-            }
-            for y in 0..h {
-                let a = (y as i32 - r as i32).clamp(0, h as i32 - 1) as usize;
-                let b = (y as i32 + r as i32).clamp(0, h as i32 - 1) as usize;
-                let count = (b - a + 1) as u32;
-                let o = (y * w + x) * 4;
-                for c in 0..4 {
-                    dst[o + c] = ((prefix[b + 1][c] - prefix[a][c]) / count) as u8;
-                }
-            }
-            prefix[0] = [0; 4];
-        }
-    }
-}
-
 fn paint(color: Rgba) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color(color_of(color));

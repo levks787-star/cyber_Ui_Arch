@@ -2,6 +2,7 @@ mod audio;
 mod backends;
 mod camera;
 mod config;
+mod detach;
 mod gpu;
 mod hud;
 mod instance;
@@ -12,11 +13,11 @@ mod theme;
 mod tiles;
 
 use audio::{Audio, Sfx};
-use camera::{damp, Orbit};
+use camera::{damp, Camera};
 use clap::Parser;
 use config::Config;
 use glam::{Mat4, Vec3};
-use gpu::{Gpu, TileDraw};
+use gpu::{Gpu, RenderQuality, TileDraw};
 use hud::{Hud, HudAction};
 use model::{Command, Hist, Snapshot};
 use paint::Canvas;
@@ -32,7 +33,31 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
+use gpu::{GpuBackend, GpuOptions};
 use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum BackendFlag {
+    Vulkan,
+    Gl,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum QualityFlag {
+    Low,
+    Medium,
+    High,
+}
+
+impl QualityFlag {
+    fn render(self) -> RenderQuality {
+        RenderQuality::parse(match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        })
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "arch-control-center", version, about = "3D control center for Arch Linux")]
@@ -49,6 +74,18 @@ struct Args {
     /// Borderless fullscreen on top. A second launch closes the open overlay.
     #[arg(long)]
     overlay: bool,
+    /// Force a graphics backend. Also ACC_BACKEND or WGPU_BACKEND (vulkan, gl).
+    #[arg(long, value_enum)]
+    backend: Option<BackendFlag>,
+    /// Use lavapipe (Vulkan software) when its ICD is installed. Does not override VK_ICD_FILENAMES.
+    #[arg(long)]
+    software: bool,
+    /// Blur resolution, bloom and MSAA. High is the default.
+    #[arg(long, value_enum, default_value_t = QualityFlag::High)]
+    quality: QualityFlag,
+    /// Keep the process attached to the terminal. By default it detaches and logs to the cache file.
+    #[arg(long, short = 'f')]
+    foreground: bool,
     #[arg(long, default_value_t = 1440u32)]
     width: u32,
     #[arg(long, default_value_t = 900u32)]
@@ -65,16 +102,30 @@ struct App {
     hue: f32,
     theme: ThemeColors,
     theme_target: ThemeColors,
-    camera: Orbit,
+    camera: Camera,
     cursor: [f32; 2],
+    cursor_prev: [f32; 2],
     cursor_valid: bool,
     drag: Drag,
+    drag_button: Option<MouseButton>,
+    alt: bool,
+    ctrl: bool,
+    shift: bool,
+    keys: FlyKeys,
     hover: Vec<f32>,
     hover_idx: Option<usize>,
     hotspots: Vec<Vec<Hotspot>>,
     hud_hits: Vec<hud::HudHit>,
     force_hover: Option<usize>,
     hist: Hist,
+    base_snap: Snapshot,
+    snap: Snapshot,
+    tile_key: Vec<u64>,
+    tile_at: Vec<Instant>,
+    hud_key: u64,
+    hud_at: Instant,
+    show_fps: bool,
+    fps_value: f32,
     cpu_vis: Vec<f32>,
     tile_canvas: Canvas,
     hud_canvas: Canvas,
@@ -98,18 +149,30 @@ struct App {
     focus_sent: Option<usize>,
     last_hover_sfx: Instant,
     last_slider_sfx: Instant,
-    blur_scratch: Vec<u8>,
     overlay: bool,
     intro: f32,
     closing: bool,
     overlay_lock: Option<instance::OverlayLock>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct FlyKeys {
+    w: bool,
+    a: bool,
+    s: bool,
+    d: bool,
+    q: bool,
+    e: bool,
+}
+
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    Orbit { last: (f32, f32) },
-    Pan { last: (f32, f32) },
+    Orbit,
+    Roll,
+    Pan,
+    Dolly,
+    Fly,
     Slider { action: Action, tile: usize },
     Hue,
 }
@@ -159,6 +222,8 @@ impl App {
         };
         let n = catalog().len();
         let hist = if args.demo || showcase { Hist::seed_demo() } else { Hist::new() };
+        let placeholder = Snapshot::placeholder(args.demo || showcase);
+        let now = Instant::now();
         Self {
             sys: SystemHandle::start(args.demo || showcase),
             args,
@@ -169,16 +234,30 @@ impl App {
             hue,
             theme,
             theme_target: theme,
-            camera: Orbit::new(),
+            camera: Camera::new(),
             cursor: [0.0, 0.0],
+            cursor_prev: [0.0, 0.0],
             cursor_valid: false,
             drag: Drag::None,
+            drag_button: None,
+            alt: false,
+            ctrl: false,
+            shift: false,
+            keys: FlyKeys::default(),
             hover: vec![0.0; n],
             hover_idx: None,
             hotspots: vec![Vec::new(); n],
             hud_hits: Vec::new(),
             force_hover: None,
             hist,
+            base_snap: placeholder.clone(),
+            snap: placeholder,
+            tile_key: vec![u64::MAX; n],
+            tile_at: vec![now; n],
+            hud_key: u64::MAX,
+            hud_at: now,
+            show_fps: false,
+            fps_value: 0.0,
             cpu_vis: Vec::new(),
             tile_canvas: Canvas::new(TEX_W, TEX_H, theme),
             hud_canvas: Canvas::new(8, 8, theme),
@@ -202,7 +281,6 @@ impl App {
             focus_sent: None,
             last_hover_sfx: Instant::now(),
             last_slider_sfx: Instant::now(),
-            blur_scratch: Vec::new(),
             overlay,
             intro: if overlay { 0.0 } else { 1.0 },
             closing: false,
@@ -217,17 +295,20 @@ impl App {
         self.time += dt;
         self.phase += dt;
         self.frames += 1;
+        self.fps_value = damp(self.fps_value, 1.0 / dt.max(1.0 / 480.0), 6.0, dt);
         if self.fps_at.elapsed() > Duration::from_secs(2) {
-            log::info!(
-                "fps {:.1}",
-                self.frames as f32 / self.fps_at.elapsed().as_secs_f32()
-            );
+            let fps = self.frames as f32 / self.fps_at.elapsed().as_secs_f32();
+            log::info!("fps {fps:.1}");
             self.frames = 0;
             self.fps_at = Instant::now();
         }
 
-        let mut snap = self.sys.snapshot();
-        self.apply_overrides(&mut snap);
+        if self.sys.copy_if_newer(&mut self.base_snap) || self.overrides_live() {
+            let mut snap = self.base_snap.clone();
+            self.apply_overrides(&mut snap);
+            self.snap = snap;
+        }
+        let snap = self.snap.clone();
         self.push_hist(&snap);
         if self.cpu_vis.len() != snap.cpu.len() {
             self.cpu_vis = snap.cpu.clone();
@@ -236,6 +317,16 @@ impl App {
             *vis = damp(*vis, *target, 8.0, dt);
         }
 
+        if matches!(self.drag, Drag::Fly) {
+            let mut wish = Vec3::ZERO;
+            if self.keys.w { wish.z += 1.0; }
+            if self.keys.s { wish.z -= 1.0; }
+            if self.keys.d { wish.x += 1.0; }
+            if self.keys.a { wish.x -= 1.0; }
+            if self.keys.e { wish.y += 1.0; }
+            if self.keys.q { wish.y -= 1.0; }
+            self.camera.fly_move(wish, dt, self.shift);
+        }
         if self.showcase && !self.user_control {
             self.camera.showcase_spin(dt);
             self.force_hover = if (1.4..7.4).contains(&self.time) {
@@ -272,45 +363,64 @@ impl App {
 
         self.tile_canvas.theme = self.theme;
         let drawn = chrono::Local::now();
+        let second = drawn.timestamp();
+        let anim = (self.time * 15.0) as u32;
+        let theme_key = theme_fingerprint(&self.theme);
+        let mut upload = vec![false; catalog().len()];
         for (i, spec) in catalog().iter().enumerate() {
+            let key = tile_fingerprint(spec.kind, &snap, theme_key, second, anim);
+            let hot = matches!(self.drag, Drag::Slider { tile, .. } if tile == i);
+            let due = self.tile_key[i] != key
+                && (hot || self.tile_key[i] == u64::MAX || self.tile_at[i].elapsed() >= Duration::from_millis(50));
+            if !due {
+                continue;
+            }
             let ctx = DrawCtx {
                 snap: &snap,
                 hist: &self.hist,
                 cpu_vis: &self.cpu_vis,
-                focus: self.hover[i],
+                focus: 0.0,
                 phase: self.phase,
                 now: drawn,
             };
             self.hotspots[i] = tiles::draw(&mut self.tile_canvas, spec, &ctx);
             self.tile_canvas.copy_rgba(&mut self.pixels[i]);
-            let hov = self.hover[i];
-            let frost_px = (max_h * 12.0 * (1.0 - hov)).clamp(0.0, 12.0);
-            if frost_px > 1.2 {
-                let radius = (frost_px * 0.65).round().clamp(2.0, 8.0) as i32;
-                paint::blur_rgba(&mut self.pixels[i], &mut self.blur_scratch, TEX_W, TEX_H, radius);
-            }
+            self.tile_key[i] = key;
+            self.tile_at[i] = Instant::now();
+            upload[i] = true;
         }
 
+        let mut hud_upload = false;
         if let Some(window) = &self.window {
             let size = window.inner_size();
             self.size = (size.width.max(1), size.height.max(1));
-            self.hud_canvas.resize(self.size.0, self.size.1);
-            self.hud_canvas.theme = self.theme;
-            let hud = Hud::draw(
-                &mut self.hud_canvas,
-                self.theme_id,
-                self.hue,
-                snap.demo,
-                max_h > 0.45,
-                self.config.sound,
-            );
-            self.hud_hits = hud.hits;
-            self.hud_canvas.copy_rgba(&mut self.hud_pixels);
+            let hud_key = hud_fingerprint(theme_key, self.theme_id, self.hue, self.config.sound, max_h > 0.45, self.size, self.show_fps, self.fps_value);
+            let hud_due = self.hud_key != hud_key
+                && (self.hud_key == u64::MAX || self.size.0 != self.hud_canvas.w || self.hud_at.elapsed() >= Duration::from_millis(50));
+            if hud_due {
+                self.hud_canvas.resize(self.size.0, self.size.1);
+                self.hud_canvas.theme = self.theme;
+                let hud = Hud::draw(
+                    &mut self.hud_canvas,
+                    self.theme_id,
+                    self.hue,
+                    snap.demo,
+                    max_h > 0.45,
+                    self.config.sound,
+                    self.show_fps.then_some(self.fps_value),
+                );
+                self.hud_hits = hud.hits;
+                self.hud_canvas.copy_rgba(&mut self.hud_pixels);
+                self.hud_key = hud_key;
+                self.hud_at = Instant::now();
+                hud_upload = true;
+            }
             let icon = if self.pointer() { CursorIcon::Pointer } else { CursorIcon::Default };
             window.set_cursor(icon);
         }
 
         let capture = self.shot_due();
+        let focus = self.hovered().filter(|_| max_h > 0.08);
         if let Some(gpu) = &mut self.gpu {
             gpu.resize(self.size.0, self.size.1);
             let aspect = self.size.0 as f32 / self.size.1 as f32;
@@ -334,10 +444,11 @@ impl App {
                 let secondary = self.theme.secondary.to_f32();
                 draws.push(TileDraw {
                     model: model.to_cols_array_2d(),
-                    params: [frost * 12.0, bright, hov, frost],
+                    params: [0.0, bright, hov, frost],
                     accent,
                     secondary,
                     pixels: &self.pixels[i],
+                    upload: upload[i],
                 });
             }
             let bg = self.theme.bg.to_f32();
@@ -355,6 +466,9 @@ impl App {
                     capture,
                     self.intro,
                     self.overlay,
+                    max_h,
+                    focus,
+                    hud_upload,
                 )
             };
             match result {
@@ -371,12 +485,6 @@ impl App {
             log::info!("shots written");
             el.exit();
         }
-
-        let budget = Duration::from_millis(16);
-        let spent = now.elapsed();
-        if spent < budget {
-            std::thread::sleep(budget - spent);
-        }
         let _ = (COLS, Kind::Host);
     }
 
@@ -384,10 +492,14 @@ impl App {
         if let Some(i) = self.force_hover {
             return Some(i);
         }
-        if matches!(self.drag, Drag::Orbit { .. } | Drag::Pan { .. }) {
+        if self.camera_drag() {
             return None;
         }
         self.hover_idx
+    }
+
+    fn camera_drag(&self) -> bool {
+        matches!(self.drag, Drag::Orbit | Drag::Roll | Drag::Pan | Drag::Dolly | Drag::Fly)
     }
 
     fn update_hover(&mut self) {
@@ -399,7 +511,7 @@ impl App {
             self.hover_idx = None;
             return;
         }
-        if matches!(self.drag, Drag::Orbit { .. } | Drag::Pan { .. }) {
+        if self.camera_drag() {
             self.hover_idx = None;
             return;
         }
@@ -438,24 +550,55 @@ impl App {
 
     fn on_mouse(&mut self, button: MouseButton, state: ElementState) {
         if state == ElementState::Released {
-            if let Drag::Hue = self.drag {
-                self.config.theme = ThemeId::Custom;
-                self.config.custom_hue = self.hue;
-                self.config.save();
+            if self.drag_button == Some(button) {
+                if let Drag::Hue = self.drag {
+                    self.config.theme = ThemeId::Custom;
+                    self.config.custom_hue = self.hue;
+                    self.config.save();
+                }
+                if let Drag::Slider { action, .. } = self.drag {
+                    self.send_slider(action, self.slider);
+                }
+                if matches!(self.drag, Drag::Fly) {
+                    self.camera.end_fly();
+                }
+                self.drag = Drag::None;
+                self.drag_button = None;
             }
-            if let Drag::Slider { action, .. } = self.drag {
-                self.send_slider(action, self.slider);
-            }
-            self.drag = Drag::None;
+            return;
+        }
+        if self.drag_button.is_some() {
             return;
         }
         if button != MouseButton::Left && button != MouseButton::Right && button != MouseButton::Middle {
             return;
         }
         self.user_control = true;
+        self.cursor_prev = self.cursor;
         let (nx, ny) = self.ndc();
-        if button == MouseButton::Right || button == MouseButton::Middle {
-            self.drag = Drag::Pan { last: (self.cursor[0], self.cursor[1]) };
+        if button == MouseButton::Middle {
+            self.drag = Drag::Pan;
+            self.drag_button = Some(button);
+            return;
+        }
+        if button == MouseButton::Right {
+            if self.alt {
+                self.drag = Drag::Dolly;
+            } else {
+                self.camera.begin_fly();
+                self.drag = Drag::Fly;
+            }
+            self.drag_button = Some(button);
+            return;
+        }
+        if self.ctrl {
+            self.drag = Drag::Roll;
+            self.drag_button = Some(button);
+            return;
+        }
+        if self.alt {
+            self.drag = Drag::Orbit;
+            self.drag_button = Some(button);
             return;
         }
         if let Some(hit) = self.hud_hits.iter().copied().find(|h| h.rect.contains(self.cursor[0], self.cursor[1])) {
@@ -469,6 +612,7 @@ impl App {
                 HudAction::Hue => {
                     self.hue_from_cursor(hit.rect);
                     self.drag = Drag::Hue;
+                    self.drag_button = Some(button);
                 }
             }
             return;
@@ -483,6 +627,7 @@ impl App {
                     Action::Volume | Action::Brightness => {
                         self.slider = hot.rect.value_x(self.tile_px(tile).0);
                         self.drag = Drag::Slider { action: hot.action, tile };
+                        self.drag_button = Some(button);
                         self.send_slider(hot.action, self.slider);
                     }
                     other => self.fire(other),
@@ -490,23 +635,21 @@ impl App {
                 return;
             }
         }
-        self.drag = Drag::Orbit { last: (nx, ny) };
+        self.drag = Drag::Orbit;
+        self.drag_button = Some(button);
+        let _ = (nx, ny);
     }
 
     fn on_cursor(&mut self) {
+        let dx = self.cursor[0] - self.cursor_prev[0];
+        let dy = self.cursor[1] - self.cursor_prev[1];
+        self.cursor_prev = self.cursor;
         match self.drag {
-            Drag::Orbit { last } => {
-                let (nx, ny) = self.ndc();
-                let dt = 1.0 / 60.0;
-                self.camera.apply_trackball(last, (nx, ny), dt);
-                self.drag = Drag::Orbit { last: (nx, ny) };
-            }
-            Drag::Pan { last } => {
-                let dx = self.cursor[0] - last.0;
-                let dy = self.cursor[1] - last.1;
-                self.camera.pan(dx, dy);
-                self.drag = Drag::Pan { last: (self.cursor[0], self.cursor[1]) };
-            }
+            Drag::Orbit => self.camera.orbit_pixels(dx, dy),
+            Drag::Roll => self.camera.roll_pixels(dx),
+            Drag::Pan => self.camera.pan_pixels(dx, dy),
+            Drag::Dolly => self.camera.dolly_pixels(dy),
+            Drag::Fly => self.camera.fly_look(dx, dy),
             Drag::Slider { action, tile } => {
                 if let Some(hot) = self.hotspots.get(tile).and_then(|list| list.iter().copied().find(|h| h.action == action)) {
                     let (x, _) = self.tile_px(tile);
@@ -546,11 +689,16 @@ impl App {
     fn on_key(&mut self, key: Key) {
         match key {
             Key::Named(NamedKey::Escape) => {}
+            Key::Named(NamedKey::F3) => self.show_fps = !self.show_fps,
             Key::Character(s) => {
                 let s = s.as_str();
                 if s.eq_ignore_ascii_case("r") {
                     self.camera.request_reset();
                     self.audio.play(Sfx::Reset);
+                    self.user_control = true;
+                } else if s.eq_ignore_ascii_case("f") {
+                    self.frame_view();
+                    self.user_control = true;
                 } else if s.eq_ignore_ascii_case("m") {
                     self.toggle_sound();
                 }
@@ -560,6 +708,39 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn frame_view(&mut self) {
+        if let Some(i) = self.hovered().or(self.hover_idx) {
+            self.camera.frame_at(grid_pos(i), 1.15);
+        } else {
+            self.camera.frame_at(Vec3::new(0.0, 0.05, 0.0), 5.1);
+        }
+    }
+
+    fn note_key(&mut self, key: &Key, down: bool) {
+        let Key::Character(s) = key else {
+            return;
+        };
+        match s.as_str() {
+            "w" | "W" => self.keys.w = down,
+            "a" | "A" => self.keys.a = down,
+            "s" | "S" => self.keys.s = down,
+            "d" | "D" => self.keys.d = down,
+            "q" | "Q" => self.keys.q = down,
+            "e" | "E" => self.keys.e = down,
+            _ => {}
+        }
+    }
+
+    fn overrides_live(&self) -> bool {
+        self.overrides.wifi.is_some()
+            || self.overrides.bt.is_some()
+            || self.overrides.volume.is_some()
+            || self.overrides.mute.is_some()
+            || self.overrides.bright.is_some()
+            || self.overrides.dnd.is_some()
+            || self.overrides.night.is_some()
     }
 
     fn set_theme(&mut self, id: ThemeId, save: bool) {
@@ -743,6 +924,65 @@ impl App {
     }
 }
 
+fn theme_fingerprint(theme: &theme::ThemeColors) -> u64 {
+    fn pack(c: [f32; 4]) -> u64 {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 32.0) as u64;
+        q(c[0]) | (q(c[1]) << 6) | (q(c[2]) << 12)
+    }
+    pack(theme.primary.to_f32())
+        ^ pack(theme.secondary.to_f32()).rotate_left(8)
+        ^ pack(theme.text.to_f32()).rotate_left(16)
+        ^ pack(theme.panel.to_f32()).rotate_left(24)
+        ^ pack(theme.bg.to_f32()).rotate_left(4)
+}
+
+fn tile_fingerprint(kind: Kind, snap: &Snapshot, theme_key: u64, second: i64, anim: u32) -> u64 {
+    let mut key = theme_key ^ snap.generation.wrapping_mul(0x9E37_79B1_85EB_CA87);
+    key ^= (snap.wifi.enabled as u64) << 1;
+    key ^= (snap.bluetooth.enabled as u64) << 2;
+    key ^= (snap.volume.muted as u64) << 3;
+    key ^= (snap.dnd.enabled as u64) << 4;
+    key ^= (snap.night.enabled as u64) << 5;
+    key ^= ((snap.volume.value * 500.0) as u64) << 8;
+    key ^= ((snap.brightness.value * 500.0) as u64) << 20;
+    match kind {
+        Kind::Clock => key ^ (second as u64).wrapping_shl(40),
+        Kind::Audio | Kind::Sensors | Kind::Cpu => key ^ (anim as u64).wrapping_shl(40),
+        Kind::Shortcuts => theme_key,
+        _ => key,
+    }
+}
+
+fn hud_fingerprint(
+    theme_key: u64,
+    theme_id: ThemeId,
+    hue: f32,
+    sound: bool,
+    focus: bool,
+    size: (u32, u32),
+    show_fps: bool,
+    fps: f32,
+) -> u64 {
+    let id = match theme_id {
+        ThemeId::Neon => 1,
+        ThemeId::Acid => 2,
+        ThemeId::Ice => 3,
+        ThemeId::Blood => 4,
+        ThemeId::Mono => 5,
+        ThemeId::Custom => 6,
+    };
+    let fps_key = if show_fps { fps.round() as u64 } else { 0 };
+    theme_key
+        ^ (id << 33)
+        ^ ((hue * 2.0) as u64).wrapping_shl(8)
+        ^ (sound as u64)
+        ^ ((focus as u64) << 2)
+        ^ ((size.0 as u64) << 40)
+        ^ ((size.1 as u64) << 20)
+        ^ fps_key.wrapping_shl(48)
+        ^ ((show_fps as u64) << 63)
+}
+
 fn pick(hover: &[f32], eye: Vec3, dir: Vec3) -> Option<(usize, f32, f32)> {
     let mut best: Option<(usize, f32, f32, f32)> = None;
     for i in 0..catalog().len() {
@@ -785,6 +1025,30 @@ fn hit_quad(model: Mat4, eye: Vec3, dir: Vec3) -> Option<(f32, f32, f32)> {
         return None;
     }
     Some((world_t, p.x + 0.5, 0.5 - p.y))
+}
+
+fn resolve_backend(flag: Option<BackendFlag>) -> GpuBackend {
+    if let Some(flag) = flag {
+        return match flag {
+            BackendFlag::Vulkan => GpuBackend::Vulkan,
+            BackendFlag::Gl => GpuBackend::Gl,
+        };
+    }
+    let from_env = std::env::var("ACC_BACKEND")
+        .or_else(|_| std::env::var("WGPU_BACKEND"))
+        .ok();
+    match from_env.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("vulkan") | Some("vk") => GpuBackend::Vulkan,
+        Some("gl") | Some("gles") | Some("opengl") => GpuBackend::Gl,
+        _ => GpuBackend::Auto,
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 fn save_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
@@ -842,8 +1106,15 @@ impl winit::application::ApplicationHandler for App {
             }
         };
         window.focus_window();
-        match Gpu::new(window.clone(), catalog().len()) {
+        let opts = GpuOptions {
+            backend: resolve_backend(self.args.backend),
+            software: self.args.software || env_flag("ACC_SOFTWARE"),
+            want_transparency: self.overlay,
+            quality: self.args.quality.render(),
+        };
+            match Gpu::new(window.clone(), catalog().len(), opts) {
             Ok(gpu) => {
+                log::info!("{}", gpu.adapter_line());
                 let size = window.inner_size();
                 self.size = (size.width.max(1), size.height.max(1));
                 self.gpu = Some(gpu);
@@ -852,7 +1123,8 @@ impl winit::application::ApplicationHandler for App {
             }
             Err(err) => {
                 eprintln!("GPU init failed: {err}");
-                eprintln!("На Arch: sudo pacman -S mesa vulkan-swrast libxkbcommon");
+                eprintln!("NVIDIA: sudo pacman -S nvidia-utils vulkan-icd-loader && vulkaninfo --summary");
+                eprintln!("AMD/Intel: vulkan-radeon или vulkan-intel. Без GPU: vulkan-swrast и --software");
                 event_loop.exit();
             }
         }
@@ -885,11 +1157,25 @@ impl winit::application::ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 80.0) as f32,
                 };
-                self.camera.zoom(lines);
                 self.user_control = true;
+                if self.alt {
+                    self.camera.dolly_lines(lines);
+                } else {
+                    let (nx, ny) = self.ndc();
+                    let aspect = self.size.0 as f32 / self.size.1.max(1) as f32;
+                    self.camera.zoom_toward_cursor(lines, nx, ny, aspect);
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                let state = mods.state();
+                self.alt = state.alt_key();
+                self.ctrl = state.control_key();
+                self.shift = state.shift_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed && !event.repeat {
+                let down = event.state == ElementState::Pressed;
+                self.note_key(&event.logical_key, down);
+                if down && !event.repeat {
                     if event.logical_key == Key::Named(NamedKey::Escape) {
                         if self.overlay {
                             self.closing = true;
@@ -913,8 +1199,11 @@ impl winit::application::ApplicationHandler for App {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
+    if !args.foreground {
+        detach::detach();
+    }
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new(args);
     if let Err(err) = event_loop.run_app(&mut app) {

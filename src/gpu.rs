@@ -41,6 +41,37 @@ struct GridUbo {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompUbo {
     params: [f32; 4],
+    extra: [f32; 4],
+}
+
+fn ubo(params: [f32; 4]) -> CompUbo {
+    CompUbo { params, extra: [0.0; 4] }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RenderQuality {
+    pub divisor: u32,
+    pub passes: u32,
+    pub bloom: bool,
+    pub msaa: u32,
+}
+
+impl RenderQuality {
+    pub fn parse(name: &str) -> Self {
+        match name {
+            "low" => Self { divisor: 8, passes: 2, bloom: false, msaa: 1 },
+            "high" => Self { divisor: 2, passes: 4, bloom: true, msaa: 4 },
+            _ => Self { divisor: 4, passes: 3, bloom: true, msaa: 1 },
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self.divisor {
+            8 => "low",
+            2 => "high",
+            _ => "medium",
+        }
+    }
 }
 
 pub struct TileDraw<'a> {
@@ -49,6 +80,7 @@ pub struct TileDraw<'a> {
     pub accent: [f32; 4],
     pub secondary: [f32; 4],
     pub pixels: &'a [u8],
+    pub upload: bool,
 }
 
 struct OwnedTex {
@@ -69,6 +101,22 @@ pub struct Gpu {
     config: wgpu::SurfaceConfiguration,
     srgb: bool,
     premul: bool,
+    transparent: bool,
+    quality: RenderQuality,
+    adapter_line: String,
+    down_pipeline: wgpu::RenderPipeline,
+    tile_overlay: wgpu::RenderPipeline,
+    frost_a: OwnedTex,
+    frost_b: OwnedTex,
+    frame_depth: wgpu::TextureView,
+    scene_msaa: Option<OwnedTex>,
+    down_bg: wgpu::BindGroup,
+    frost_h_bg: wgpu::BindGroup,
+    frost_v_bg: wgpu::BindGroup,
+    composite_sharp: wgpu::BindGroup,
+    down_buf: wgpu::Buffer,
+    frost_h_buf: wgpu::Buffer,
+    frost_v_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
@@ -113,86 +161,24 @@ struct PostLayouts {
 }
 
 impl Gpu {
-    pub fn new(window: Arc<Window>, tile_count: usize) -> Result<Self, String> {
-        if !std::path::Path::new("/dev/dri/card0").exists() && std::env::var_os("VK_ICD_FILENAMES").is_none()
-        {
-            log::info!("no DRM card, forcing lavapipe");
-            std::env::set_var(
-                "VK_ICD_FILENAMES",
-                "/usr/share/vulkan/icd.d/lvp_icd.json",
-            );
+    pub fn new(window: Arc<Window>, tile_count: usize, opts: GpuOptions) -> Result<Self, String> {
+        let boot = boot_gpu(&window, opts)?;
+        let surface = boot.surface;
+        let device = boot.device;
+        let queue = boot.queue;
+        let config = boot.config;
+        let width = config.width;
+        let height = config.height;
+        let format = config.format;
+        let mut quality = opts.quality;
+        if quality.msaa > boot.max_samples || (quality.msaa > 1 && !boot.resolve) {
+            quality.msaa = 1;
         }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            flags: wgpu::InstanceFlags::default(),
-            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
-            gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
-        });
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| format!("surface: {e}"))?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .or_else(|| {
-            log::warn!("no hardware adapter, requesting fallback");
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: true,
-            }))
-        })
-        .ok_or_else(|| "no GPU adapter. Install mesa / vulkan-swrast (lavapipe).".to_string())?;
-        let info = adapter.get_info();
-        log::info!("GPU {} ({:?})", info.name, info.backend);
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("acc"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-                memory_hints: wgpu::MemoryHints::Performance,
-            },
-            None,
-        ))
-        .map_err(|e| format!("device: {e}"))?;
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        let present = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate, wgpu::PresentMode::Fifo]
-            .into_iter()
-            .find(|m| caps.present_modes.contains(m))
-            .unwrap_or(wgpu::PresentMode::Fifo);
-        let size = window.inner_size();
-        let width = size.width.max(1);
-        let height = size.height.max(1);
-        let alpha_mode = [
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::PostMultiplied,
-            wgpu::CompositeAlphaMode::Inherit,
-            wgpu::CompositeAlphaMode::Opaque,
-        ]
-        .into_iter()
-        .find(|mode| caps.alpha_modes.contains(mode))
-        .unwrap_or(caps.alpha_modes[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width,
-            height,
-            present_mode: present,
-            alpha_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-        log::info!("surface {format:?} {alpha_mode:?} {width}x{height} present {present:?}");
+        quality.msaa = quality.msaa.max(1);
+        let msaa = quality.msaa;
+        let adapter_line = format!("{} quality={} msaa={msaa}", boot.adapter_line, quality.name());
+        eprintln!("{adapter_line}");
+        log::info!("{adapter_line}");
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
@@ -236,38 +222,8 @@ impl Gpu {
             label: Some("tile"),
             source: wgpu::ShaderSource::Wgsl(include_str!("tile.wgsl").into()),
         });
-        let tile_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tile"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("tile"),
-                bind_group_layouts: &[&camera_layout, &tile_layout],
-                push_constant_ranges: &[],
-            })),
-            vertex: wgpu::VertexState {
-                module: &tile_shader,
-                entry_point: Some("vs_tile"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &tile_shader,
-                entry_point: Some("fs_tile"),
-                targets: &[Some(color_target(
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::BlendState::ALPHA_BLENDING),
-                ))],
-                compilation_options: Default::default(),
-            }),
-            primitive: primitive(),
-            depth_stencil: Some(depth_state()),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let tile_pipeline = make_tile_pipeline(&device, &camera_layout, &tile_layout, &tile_shader, msaa);
+        let tile_overlay = make_tile_pipeline(&device, &camera_layout, &tile_layout, &tile_shader, 1);
 
         let quad = [
             Vertex { pos: [-0.5, 0.5, 0.0], uv: [0.0, 0.0] },
@@ -355,7 +311,7 @@ impl Gpu {
             }),
             primitive: primitive(),
             depth_stencil: Some(depth_state()),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: mesh_samples(msaa),
             multiview: None,
             cache: None,
         });
@@ -405,26 +361,33 @@ impl Gpu {
         let blur_pipeline = fullscreen_pipeline(&device, &post_layouts.blur, &blur_shader, "vs_full", "fs_blur", wgpu::TextureFormat::Rgba8Unorm, None);
         let composite_pipeline = fullscreen_pipeline(&device, &post_layouts.composite, &composite_shader, "vs_full", "fs_composite", wgpu::TextureFormat::Rgba8Unorm, None);
         let blit_pipeline = fullscreen_pipeline(&device, &post_layouts.blit, &blit_shader, "vs_full", "fs_blit", format, None);
+        let down_shader = shader(&device, "down", include_str!("down.wgsl"));
+        let down_pipeline = fullscreen_pipeline(&device, &post_layouts.blur, &down_shader, "vs_full", "fs_down", wgpu::TextureFormat::Rgba8Unorm, None);
 
         let blur_h_buf = uniform_buf(&device, "blur-h");
         let blur_v_buf = uniform_buf(&device, "blur-v");
         let comp_buf = uniform_buf(&device, "comp");
         let blit_buf = uniform_buf(&device, "blit");
+        let down_buf = uniform_buf(&device, "down");
+        let frost_h_buf = uniform_buf(&device, "frost-h");
+        let frost_v_buf = uniform_buf(&device, "frost-v");
 
-        let scene = color_tex(&device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        let depth_view = depth_tex(&device, width, height);
-        let bw = (width / 4).max(1);
-        let bh = (height / 4).max(1);
-        let bloom_a = color_tex(&device, bw, bh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        let bloom_b = color_tex(&device, bw, bh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        let frame = color_tex(&device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC);
-        let hud = color_tex(&device, width, height, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-
-        let extract_bg = bind_tex(&device, &post_layouts.extract, &scene.view, &sampler, None);
-        let blur_h_bg = bind_tex(&device, &post_layouts.blur, &bloom_a.view, &sampler, Some(&blur_h_buf));
-        let blur_v_bg = bind_tex(&device, &post_layouts.blur, &bloom_b.view, &sampler, Some(&blur_v_buf));
-        let composite_bg = bind_composite(&device, &post_layouts.composite, &scene.view, &bloom_a.view, &hud.view, &sampler, &comp_buf);
-        let blit_bg = bind_tex(&device, &post_layouts.blit, &frame.view, &sampler, Some(&blit_buf));
+        let targets = build_targets(
+            &device,
+            width,
+            height,
+            msaa,
+            quality.divisor,
+            &sampler,
+            &post_layouts,
+            &blur_h_buf,
+            &blur_v_buf,
+            &comp_buf,
+            &blit_buf,
+            &down_buf,
+            &frost_h_buf,
+            &frost_v_buf,
+        );
 
         Ok(Self {
             surface,
@@ -432,7 +395,23 @@ impl Gpu {
             queue,
             config,
             srgb: format.is_srgb(),
-            premul: alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+            premul: boot.premul,
+            transparent: boot.transparent,
+            quality,
+            adapter_line,
+            down_pipeline,
+            tile_overlay,
+            frost_a: targets.frost_a,
+            frost_b: targets.frost_b,
+            frame_depth: targets.frame_depth,
+            scene_msaa: targets.scene_msaa,
+            down_bg: targets.down_bg,
+            frost_h_bg: targets.frost_h_bg,
+            frost_v_bg: targets.frost_v_bg,
+            composite_sharp: targets.composite_sharp,
+            down_buf,
+            frost_h_buf,
+            frost_v_buf,
             sampler,
             camera_buf,
             camera_bg,
@@ -445,21 +424,21 @@ impl Gpu {
             grid_ib,
             grid_buf,
             grid_bg,
-            scene,
-            depth_view,
-            bloom_a,
-            bloom_b,
-            frame,
-            hud,
+            scene: targets.scene,
+            depth_view: targets.depth_view,
+            bloom_a: targets.bloom_a,
+            bloom_b: targets.bloom_b,
+            frame: targets.frame,
+            hud: targets.hud,
             extract_pipeline,
             blur_pipeline,
             composite_pipeline,
             blit_pipeline,
-            extract_bg,
-            blur_h_bg,
-            blur_v_bg,
-            composite_bg,
-            blit_bg,
+            extract_bg: targets.extract_bg,
+            blur_h_bg: targets.blur_h_bg,
+            blur_v_bg: targets.blur_v_bg,
+            composite_bg: targets.composite_bg,
+            blit_bg: targets.blit_bg,
             blur_h_buf,
             blur_v_buf,
             comp_buf,
@@ -468,6 +447,10 @@ impl Gpu {
             width,
             height,
         })
+    }
+
+    pub fn adapter_line(&self) -> &str {
+        &self.adapter_line
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -481,19 +464,41 @@ impl Gpu {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.scene = color_tex(&self.device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        self.depth_view = depth_tex(&self.device, width, height);
-        let bw = (width / 4).max(1);
-        let bh = (height / 4).max(1);
-        self.bloom_a = color_tex(&self.device, bw, bh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        self.bloom_b = color_tex(&self.device, bw, bh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        self.frame = color_tex(&self.device, width, height, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC);
-        self.hud = color_tex(&self.device, width, height, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-        self.extract_bg = bind_tex(&self.device, &self.post_layouts.extract, &self.scene.view, &self.sampler, None);
-        self.blur_h_bg = bind_tex(&self.device, &self.post_layouts.blur, &self.bloom_a.view, &self.sampler, Some(&self.blur_h_buf));
-        self.blur_v_bg = bind_tex(&self.device, &self.post_layouts.blur, &self.bloom_b.view, &self.sampler, Some(&self.blur_v_buf));
-        self.composite_bg = bind_composite(&self.device, &self.post_layouts.composite, &self.scene.view, &self.bloom_a.view, &self.hud.view, &self.sampler, &self.comp_buf);
-        self.blit_bg = bind_tex(&self.device, &self.post_layouts.blit, &self.frame.view, &self.sampler, Some(&self.blit_buf));
+        let targets = build_targets(
+            &self.device,
+            width,
+            height,
+            self.quality.msaa,
+            self.quality.divisor,
+            &self.sampler,
+            &self.post_layouts,
+            &self.blur_h_buf,
+            &self.blur_v_buf,
+            &self.comp_buf,
+            &self.blit_buf,
+            &self.down_buf,
+            &self.frost_h_buf,
+            &self.frost_v_buf,
+        );
+        self.scene = targets.scene;
+        self.scene_msaa = targets.scene_msaa;
+        self.depth_view = targets.depth_view;
+        self.bloom_a = targets.bloom_a;
+        self.bloom_b = targets.bloom_b;
+        self.frame = targets.frame;
+        self.frame_depth = targets.frame_depth;
+        self.hud = targets.hud;
+        self.frost_a = targets.frost_a;
+        self.frost_b = targets.frost_b;
+        self.extract_bg = targets.extract_bg;
+        self.blur_h_bg = targets.blur_h_bg;
+        self.blur_v_bg = targets.blur_v_bg;
+        self.composite_bg = targets.composite_bg;
+        self.composite_sharp = targets.composite_sharp;
+        self.blit_bg = targets.blit_bg;
+        self.down_bg = targets.down_bg;
+        self.frost_h_bg = targets.frost_h_bg;
+        self.frost_v_bg = targets.frost_v_bg;
     }
 
     pub fn render(
@@ -506,6 +511,9 @@ impl Gpu {
         capture: bool,
         intro: f32,
         overlay: bool,
+        frost: f32,
+        focus: Option<usize>,
+        hud_upload: bool,
     ) -> Result<Option<Vec<u8>>, String> {
         if self.width == 0 || self.height == 0 {
             return Ok(None);
@@ -527,7 +535,7 @@ impl Gpu {
                     secondary: draw.secondary,
                 }),
             );
-            if draw.pixels.len() == (TEX_W * TEX_H * 4) as usize {
+            if draw.upload && draw.pixels.len() == (TEX_W * TEX_H * 4) as usize {
                 self.queue.write_texture(
                     wgpu::ImageCopyTexture {
                         texture: &tile.texture,
@@ -545,7 +553,7 @@ impl Gpu {
                 );
             }
         }
-        if hud_pixels.len() == (self.width * self.height * 4) as usize {
+        if hud_upload && hud_pixels.len() == (self.width * self.height * 4) as usize {
             self.queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.hud.texture,
@@ -564,25 +572,33 @@ impl Gpu {
         }
         let bw = (self.width / 4).max(1) as f32;
         let bh = (self.height / 4).max(1) as f32;
-        self.queue.write_buffer(&self.blur_h_buf, 0, bytemuck::bytes_of(&CompUbo { params: [1.0 / bw, 0.0, 0.0, 0.0] }));
-        self.queue.write_buffer(&self.blur_v_buf, 0, bytemuck::bytes_of(&CompUbo { params: [0.0, 1.0 / bh, 0.0, 0.0] }));
+        let frost = frost.clamp(0.0, 1.0);
+        let fw = (self.width / self.quality.divisor.max(1)).max(1) as f32;
+        let fh = (self.height / self.quality.divisor.max(1)).max(1) as f32;
+        self.queue.write_buffer(&self.blur_h_buf, 0, bytemuck::bytes_of(&ubo([1.0 / bw, 0.0, 0.0, 0.0])));
+        self.queue.write_buffer(&self.blur_v_buf, 0, bytemuck::bytes_of(&ubo([0.0, 1.0 / bh, 0.0, 0.0])));
+        self.queue.write_buffer(&self.down_buf, 0, bytemuck::bytes_of(&ubo([1.0 / self.width as f32, 1.0 / self.height as f32, 0.0, 0.0])));
+        self.queue.write_buffer(&self.frost_h_buf, 0, bytemuck::bytes_of(&ubo([1.0 / fw, 0.0, 0.0, 0.0])));
+        self.queue.write_buffer(&self.frost_v_buf, 0, bytemuck::bytes_of(&ubo([0.0, 1.0 / fh, 0.0, 0.0])));
         let clear_a = if overlay { 0.0 } else { 1.0 };
+        let bloom_strength = if self.quality.bloom { 0.95 } else { 0.0 };
         self.queue.write_buffer(
             &self.comp_buf,
             0,
             bytemuck::bytes_of(&CompUbo {
                 params: [
                     intro.clamp(0.0, 1.0),
-                    if overlay { 1.0 } else { 0.0 },
-                    0.95,
+                    if overlay && self.transparent { 1.0 } else { 0.0 },
+                    bloom_strength,
                     if self.premul { 1.0 } else { 0.0 },
                 ],
+                extra: [if frost > 0.02 { frost } else { 0.0 }, 0.0, 0.0, 0.0],
             }),
         );
         self.queue.write_buffer(
             &self.blit_buf,
             0,
-            bytemuck::bytes_of(&CompUbo { params: [0.0, 0.0, 0.0, if self.srgb { 1.0 } else { 0.0 }] }),
+            bytemuck::bytes_of(&ubo([0.0, 0.0, 0.0, if self.srgb { 1.0 } else { 0.0 }])),
         );
 
         let frame = match self.surface.get_current_texture() {
@@ -596,11 +612,17 @@ impl Gpu {
         let swap_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
+            let color_view: &wgpu::TextureView = if let Some(msaa) = &self.scene_msaa {
+                &msaa.view
+            } else {
+                &self.scene.view
+            };
+            let resolve = if self.scene_msaa.is_some() { Some(&self.scene.view) } else { None };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scene.view,
-                    resolve_target: None,
+                    view: color_view,
+                    resolve_target: resolve,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: clear[0] as f64,
@@ -633,10 +655,26 @@ impl Gpu {
                 pass.draw_indexed(0..6, 0, 0..1);
             }
         }
-        self.fullscreen(&mut encoder, &self.extract_pipeline, &self.extract_bg, &self.bloom_a.view);
-        self.fullscreen(&mut encoder, &self.blur_pipeline, &self.blur_h_bg, &self.bloom_b.view);
-        self.fullscreen(&mut encoder, &self.blur_pipeline, &self.blur_v_bg, &self.bloom_a.view);
-        self.fullscreen(&mut encoder, &self.composite_pipeline, &self.composite_bg, &self.frame.view);
+        if self.quality.bloom {
+            self.fullscreen(&mut encoder, &self.extract_pipeline, &self.extract_bg, &self.bloom_a.view);
+            self.fullscreen(&mut encoder, &self.blur_pipeline, &self.blur_h_bg, &self.bloom_b.view);
+            self.fullscreen(&mut encoder, &self.blur_pipeline, &self.blur_v_bg, &self.bloom_a.view);
+        } else {
+            clear_view(&mut encoder, &self.bloom_a.view);
+        }
+        if frost > 0.02 {
+            self.fullscreen(&mut encoder, &self.down_pipeline, &self.down_bg, &self.frost_a.view);
+            for _ in 0..self.quality.passes.max(1) {
+                self.fullscreen(&mut encoder, &self.blur_pipeline, &self.frost_h_bg, &self.frost_b.view);
+                self.fullscreen(&mut encoder, &self.blur_pipeline, &self.frost_v_bg, &self.frost_a.view);
+            }
+            self.fullscreen(&mut encoder, &self.composite_pipeline, &self.composite_bg, &self.frame.view);
+            if let Some(index) = focus {
+                self.draw_focus(&mut encoder, index);
+            }
+        } else {
+            self.fullscreen(&mut encoder, &self.composite_pipeline, &self.composite_sharp, &self.frame.view);
+        }
         self.fullscreen(&mut encoder, &self.blit_pipeline, &self.blit_bg, &swap_view);
 
         let shot = if capture {
@@ -695,6 +733,39 @@ impl Gpu {
         Ok(None)
     }
 
+    fn draw_focus(&self, encoder: &mut wgpu::CommandEncoder, index: usize) {
+        let Some(tile) = self.tiles.get(index) else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("focus"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.frame.view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.frame_depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.tile_overlay);
+        pass.set_bind_group(0, &self.camera_bg, &[]);
+        pass.set_vertex_buffer(0, self.quad_vb.slice(..));
+        pass.set_index_buffer(self.quad_ib.slice(..), wgpu::IndexFormat::Uint16);
+        pass.set_bind_group(1, &tile.bind, &[]);
+        pass.draw_indexed(0..6, 0, 0..1);
+    }
+
     fn fullscreen(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -743,11 +814,15 @@ fn uniform_buf(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
 }
 
 fn color_tex(device: &wgpu::Device, width: u32, height: u32, usage: wgpu::TextureUsages) -> OwnedTex {
+    color_tex_ms(device, width, height, 1, usage)
+}
+
+fn color_tex_ms(device: &wgpu::Device, width: u32, height: u32, samples: u32, usage: wgpu::TextureUsages) -> OwnedTex {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("color"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage,
@@ -757,18 +832,202 @@ fn color_tex(device: &wgpu::Device, width: u32, height: u32, usage: wgpu::Textur
     OwnedTex { texture, view }
 }
 
-fn depth_tex(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+fn depth_tex_ms(device: &wgpu::Device, width: u32, height: u32, samples: u32) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth24Plus,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn mesh_samples(count: u32) -> wgpu::MultisampleState {
+    wgpu::MultisampleState {
+        count,
+        mask: !0,
+        alpha_to_coverage_enabled: false,
+    }
+}
+
+fn make_tile_pipeline(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+    tile_layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+    samples: u32,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("tile"),
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tile"),
+            bind_group_layouts: &[camera_layout, tile_layout],
+            push_constant_ranges: &[],
+        })),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_tile"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_tile"),
+            targets: &[Some(color_target(
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(wgpu::BlendState::ALPHA_BLENDING),
+            ))],
+            compilation_options: Default::default(),
+        }),
+        primitive: primitive(),
+        depth_stencil: Some(depth_state()),
+        multisample: mesh_samples(samples),
+        multiview: None,
+        cache: None,
+    })
+}
+
+struct PostTargets {
+    scene: OwnedTex,
+    scene_msaa: Option<OwnedTex>,
+    depth_view: wgpu::TextureView,
+    bloom_a: OwnedTex,
+    bloom_b: OwnedTex,
+    frame: OwnedTex,
+    frame_depth: wgpu::TextureView,
+    hud: OwnedTex,
+    frost_a: OwnedTex,
+    frost_b: OwnedTex,
+    extract_bg: wgpu::BindGroup,
+    blur_h_bg: wgpu::BindGroup,
+    blur_v_bg: wgpu::BindGroup,
+    composite_bg: wgpu::BindGroup,
+    composite_sharp: wgpu::BindGroup,
+    blit_bg: wgpu::BindGroup,
+    down_bg: wgpu::BindGroup,
+    frost_h_bg: wgpu::BindGroup,
+    frost_v_bg: wgpu::BindGroup,
+}
+
+fn build_targets(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    msaa: u32,
+    divisor: u32,
+    sampler: &wgpu::Sampler,
+    layouts: &PostLayouts,
+    blur_h_buf: &wgpu::Buffer,
+    blur_v_buf: &wgpu::Buffer,
+    comp_buf: &wgpu::Buffer,
+    blit_buf: &wgpu::Buffer,
+    down_buf: &wgpu::Buffer,
+    frost_h_buf: &wgpu::Buffer,
+    frost_v_buf: &wgpu::Buffer,
+) -> PostTargets {
+    let scene = color_tex(
+        device,
+        width,
+        height,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let scene_msaa = if msaa > 1 {
+        Some(color_tex_ms(device, width, height, msaa, wgpu::TextureUsages::RENDER_ATTACHMENT))
+    } else {
+        None
+    };
+    let depth_view = depth_tex_ms(device, width, height, msaa);
+    let bw = (width / 4).max(1);
+    let bh = (height / 4).max(1);
+    let bloom_a = color_tex(
+        device,
+        bw,
+        bh,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let bloom_b = color_tex(
+        device,
+        bw,
+        bh,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let frame = color_tex(
+        device,
+        width,
+        height,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+    );
+    let frame_depth = depth_tex_ms(device, width, height, 1);
+    let hud = color_tex(device, width, height, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+    let fw = (width / divisor.max(1)).max(1);
+    let fh = (height / divisor.max(1)).max(1);
+    let frost_a = color_tex(
+        device,
+        fw,
+        fh,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let frost_b = color_tex(
+        device,
+        fw,
+        fh,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let extract_bg = bind_tex(device, &layouts.extract, &scene.view, sampler, None);
+    let blur_h_bg = bind_tex(device, &layouts.blur, &bloom_a.view, sampler, Some(blur_h_buf));
+    let blur_v_bg = bind_tex(device, &layouts.blur, &bloom_b.view, sampler, Some(blur_v_buf));
+    let down_bg = bind_tex(device, &layouts.blur, &scene.view, sampler, Some(down_buf));
+    let frost_h_bg = bind_tex(device, &layouts.blur, &frost_a.view, sampler, Some(frost_h_buf));
+    let frost_v_bg = bind_tex(device, &layouts.blur, &frost_b.view, sampler, Some(frost_v_buf));
+    let composite_bg = bind_composite(device, &layouts.composite, &scene.view, &bloom_a.view, &hud.view, &frost_a.view, sampler, comp_buf);
+    let composite_sharp = bind_composite(device, &layouts.composite, &scene.view, &bloom_a.view, &hud.view, &scene.view, sampler, comp_buf);
+    let blit_bg = bind_tex(device, &layouts.blit, &frame.view, sampler, Some(blit_buf));
+    PostTargets {
+        scene,
+        scene_msaa,
+        depth_view,
+        bloom_a,
+        bloom_b,
+        frame,
+        frame_depth,
+        hud,
+        frost_a,
+        frost_b,
+        extract_bg,
+        blur_h_bg,
+        blur_v_bg,
+        composite_bg,
+        composite_sharp,
+        blit_bg,
+        down_bg,
+        frost_h_bg,
+        frost_v_bg,
+    }
+}
+
+fn clear_view(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
 }
 
 fn primitive() -> wgpu::PrimitiveState {
@@ -861,6 +1120,8 @@ fn composite_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             sampler_entry(4, wgpu::ShaderStages::FRAGMENT),
             texture_entry(5, wgpu::ShaderStages::FRAGMENT),
             sampler_entry(6, wgpu::ShaderStages::FRAGMENT),
+            texture_entry(7, wgpu::ShaderStages::FRAGMENT),
+            sampler_entry(8, wgpu::ShaderStages::FRAGMENT),
         ],
     })
 }
@@ -892,6 +1153,7 @@ fn bind_composite(
     scene: &wgpu::TextureView,
     bloom: &wgpu::TextureView,
     hud: &wgpu::TextureView,
+    frost: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
     uniform: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
@@ -906,6 +1168,8 @@ fn bind_composite(
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(hud) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(frost) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(sampler) },
         ],
     })
 }
@@ -944,6 +1208,374 @@ fn fullscreen_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuBackend {
+    Auto,
+    Vulkan,
+    Gl,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GpuOptions {
+    pub backend: GpuBackend,
+    pub software: bool,
+    pub want_transparency: bool,
+    pub quality: RenderQuality,
+}
+
+struct Boot {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    premul: bool,
+    transparent: bool,
+    max_samples: u32,
+    resolve: bool,
+    adapter_line: String,
+}
+
+struct Attempt {
+    backend: wgpu::Backends,
+    software: bool,
+    transparent: bool,
+    label: &'static str,
+}
+
+fn boot_gpu(window: &Arc<Window>, opts: GpuOptions) -> Result<Boot, String> {
+    log_gpu_env();
+    let attempts = attempts_for(opts);
+    let mut errors = Vec::new();
+    for attempt in attempts {
+        log::info!(
+            "gpu try: {} backend={:?} software={} transparent={}",
+            attempt.label,
+            attempt.backend,
+            attempt.software,
+            attempt.transparent
+        );
+        match try_attempt(window, &attempt) {
+            Ok(boot) => return Ok(boot),
+            Err(err) => {
+                log::warn!("gpu try {} failed: {err}", attempt.label);
+                errors.push(format!("{}: {err}", attempt.label));
+            }
+        }
+    }
+    Err(format!(
+        "no usable GPU adapter.\n{}\nПроверьте README: vulkan-icd-loader, nvidia-utils (RTX), vulkan-radeon/intel или vulkan-swrast и `vulkaninfo --summary`. Флаги: --backend vulkan|gl, --software.",
+        errors.join("\n")
+    ))
+}
+
+fn attempts_for(opts: GpuOptions) -> Vec<Attempt> {
+    let mut out = Vec::new();
+    let mut add = |backend, label| {
+        if opts.want_transparency {
+            out.push(Attempt { backend, software: false, transparent: true, label });
+        }
+        out.push(Attempt { backend, software: false, transparent: false, label });
+    };
+    if !opts.software {
+        match opts.backend {
+            GpuBackend::Auto | GpuBackend::Vulkan => add(wgpu::Backends::VULKAN, "vulkan"),
+            GpuBackend::Gl => {}
+        }
+        match opts.backend {
+            GpuBackend::Auto | GpuBackend::Gl => add(wgpu::Backends::GL, "gl"),
+            GpuBackend::Vulkan => {}
+        }
+    }
+    let explicit_software = opts.software;
+    let no_render_node = !dri_node_present();
+    if explicit_software || (no_render_node && lavapipe_icd().is_some() && std::env::var_os("VK_ICD_FILENAMES").is_none()) {
+        out.push(Attempt {
+            backend: wgpu::Backends::VULKAN,
+            software: true,
+            transparent: false,
+            label: "lavapipe",
+        });
+        if opts.want_transparency {
+            out.push(Attempt {
+                backend: wgpu::Backends::VULKAN,
+                software: true,
+                transparent: true,
+                label: "lavapipe-transparent",
+            });
+        }
+    }
+    out
+}
+
+fn try_attempt(window: &Arc<Window>, attempt: &Attempt) -> Result<Boot, String> {
+    let icd_guard = SoftwareIcd::apply(attempt.software)?;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: attempt.backend,
+        flags: wgpu::InstanceFlags::default(),
+        dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
+    });
+    drop(icd_guard);
+    log_adapters(&instance, attempt.backend);
+    window.set_transparent(attempt.transparent);
+    let surface = instance
+        .create_surface(window.clone())
+        .map_err(|e| format!("surface: {e}"))?;
+    let adapter = pick_adapter(&instance, &surface, attempt.software)
+        .ok_or_else(|| "no compatible adapter for this surface".to_string())?;
+    let info = adapter.get_info();
+    log::info!(
+        "using adapter '{}' backend={:?} type={:?} driver={} {}",
+        info.name,
+        info.backend,
+        info.device_type,
+        info.driver,
+        info.driver_info
+    );
+    let (device, queue) = open_device(&adapter)?;
+    let caps = surface.get_capabilities(&adapter);
+    if caps.formats.is_empty() {
+        return Err("adapter exposes no surface formats".into());
+    }
+    log::info!(
+        "surface caps formats={:?} alpha={:?} present={:?}",
+        caps.formats,
+        caps.alpha_modes,
+        caps.present_modes
+    );
+    let format = choose_format(&caps.formats);
+    let alpha_mode = choose_alpha(&caps.alpha_modes, attempt.transparent);
+    let present = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo]
+    .into_iter()
+    .find(|mode| caps.present_modes.contains(mode))
+    .unwrap_or(wgpu::PresentMode::Fifo);
+    let size = window.inner_size();
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: present,
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &config);
+    let format_flags = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm).flags;
+    let max_samples = [4u32, 2, 1]
+        .into_iter()
+        .find(|count| format_flags.sample_count_supported(*count))
+        .unwrap_or(1);
+    let resolve = format_flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE);
+    let adapter_line = format!(
+        "GPU adapter '{}' backend={:?} type={:?} driver={} {} present={:?}",
+        info.name, info.backend, info.device_type, info.driver, info.driver_info, present
+    );
+    log::info!(
+        "surface {format:?} {alpha_mode:?} {}x{} present {present:?} transparent={} msaa_max={max_samples} resolve={resolve}",
+        config.width,
+        config.height,
+        attempt.transparent
+    );
+    Ok(Boot {
+        surface,
+        device,
+        queue,
+        config,
+        premul: alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
+        transparent: attempt.transparent && alpha_mode != wgpu::CompositeAlphaMode::Opaque,
+        max_samples,
+        resolve,
+        adapter_line,
+    })
+}
+
+fn pick_adapter(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface,
+    software: bool,
+) -> Option<wgpu::Adapter> {
+    let prefs = [
+        wgpu::PowerPreference::HighPerformance,
+        wgpu::PowerPreference::LowPower,
+    ];
+    for power_preference in prefs {
+        if let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            compatible_surface: Some(surface),
+            force_fallback_adapter: software,
+        })) {
+            return Some(adapter);
+        }
+    }
+    None
+}
+
+fn open_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    let mut last = String::from("request_device");
+    for limits in [adapter.limits(), wgpu::Limits::downlevel_defaults()] {
+        match pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("acc"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                memory_hints: wgpu::MemoryHints::Performance,
+            },
+            None,
+        )) {
+            Ok(pair) => return Ok(pair),
+            Err(err) => last = err.to_string(),
+        }
+    }
+    Err(last)
+}
+
+fn choose_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    for want in [
+        wgpu::TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ] {
+        if formats.contains(&want) {
+            return want;
+        }
+    }
+    formats
+        .iter()
+        .copied()
+        .find(|format| !format.is_srgb())
+        .unwrap_or(formats[0])
+}
+
+fn choose_alpha(modes: &[wgpu::CompositeAlphaMode], transparent: bool) -> wgpu::CompositeAlphaMode {
+    let order = if transparent {
+        [
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::Opaque,
+        ]
+    } else {
+        [
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ]
+    };
+    order
+        .into_iter()
+        .find(|mode| modes.contains(mode))
+        .unwrap_or(modes[0])
+}
+
+fn log_adapters(instance: &wgpu::Instance, backends: wgpu::Backends) {
+    let adapters = instance.enumerate_adapters(backends);
+    if adapters.is_empty() {
+        log::warn!("no adapters enumerated for {backends:?}");
+        return;
+    }
+    for adapter in adapters {
+        let info = adapter.get_info();
+        log::info!(
+            "found adapter '{}' backend={:?} type={:?} driver={} {}",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver,
+            info.driver_info
+        );
+    }
+}
+
+fn log_gpu_env() {
+    match std::fs::read_dir("/dev/dri") {
+        Ok(entries) => {
+            let mut names: Vec<String> = entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            log::info!(
+                "/dev/dri: {}",
+                if names.is_empty() { "(empty)".to_string() } else { names.join(", ") }
+            );
+        }
+        Err(err) => log::info!("/dev/dri unreadable: {err}"),
+    }
+    for icd in [
+        "/usr/share/vulkan/icd.d/nvidia_icd.json",
+        "/usr/share/vulkan/icd.d/radeon_icd.json",
+        "/usr/share/vulkan/icd.d/intel_icd.json",
+        "/usr/share/vulkan/icd.d/lvp_icd.json",
+    ] {
+        log::info!(
+            "icd {} {}",
+            icd,
+            if std::path::Path::new(icd).exists() { "present" } else { "absent" }
+        );
+    }
+    match std::env::var("VK_ICD_FILENAMES") {
+        Ok(value) => log::info!("VK_ICD_FILENAMES is already set, leaving it unchanged: {value}"),
+        Err(_) => log::info!("VK_ICD_FILENAMES is unset; the Vulkan loader chooses the ICD"),
+    }
+}
+
+fn dri_node_present() -> bool {
+    let Ok(entries) = std::fs::read_dir("/dev/dri") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("card") || name.starts_with("renderD")
+    })
+}
+
+fn lavapipe_icd() -> Option<&'static str> {
+    let path = "/usr/share/vulkan/icd.d/lvp_icd.json";
+    std::path::Path::new(path).exists().then_some(path)
+}
+
+struct SoftwareIcd {
+    previous: Option<String>,
+    active: bool,
+}
+
+impl SoftwareIcd {
+    fn apply(software: bool) -> Result<Self, String> {
+        if !software {
+            return Ok(Self { previous: None, active: false });
+        }
+        if std::env::var_os("VK_ICD_FILENAMES").is_some() {
+            log::info!("software render requested, but VK_ICD_FILENAMES is already set so it is kept");
+            return Ok(Self { previous: None, active: false });
+        }
+        let Some(path) = lavapipe_icd() else {
+            return Err(
+                "lavapipe ICD is missing (/usr/share/vulkan/icd.d/lvp_icd.json). Install vulkan-swrast and do not point VK_ICD_FILENAMES at a GPU that is not present."
+                    .into(),
+            );
+        };
+        log::info!("trying lavapipe via VK_ICD_FILENAMES={path}");
+        std::env::set_var("VK_ICD_FILENAMES", path);
+        Ok(Self {
+            previous: None,
+            active: true,
+        })
+    }
+}
+
+impl Drop for SoftwareIcd {
+    fn drop(&mut self) {
+        if self.active {
+            std::env::remove_var("VK_ICD_FILENAMES");
+        }
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("VK_ICD_FILENAMES", previous);
+        }
+    }
 }
 
 trait BufferInit {

@@ -111,7 +111,8 @@ pub struct DrawCtx<'a> {
 }
 
 pub fn draw(canvas: &mut Canvas, spec: &TileSpec, ctx: &DrawCtx) -> Vec<Hotspot> {
-    chrome(canvas, spec.index, spec.title, ctx.focus);
+    let _ = ctx.focus;
+    chrome(canvas, spec.index, spec.title);
     match spec.kind {
         Kind::Host => host(canvas, ctx),
         Kind::Clock => clock(canvas, ctx),
@@ -136,21 +137,10 @@ pub fn draw(canvas: &mut Canvas, spec: &TileSpec, ctx: &DrawCtx) -> Vec<Hotspot>
     }
 }
 
-fn chrome(c: &mut Canvas, index: &str, title: &str, focus: f32) {
+fn chrome(c: &mut Canvas, index: &str, title: &str) {
     c.clear(c.theme.panel);
     let primary = c.theme.primary;
     let secondary = c.theme.secondary;
-    if focus > 0.08 {
-        c.stroke_round(
-            6.0,
-            6.0,
-            TEX_W as f32 - 12.0,
-            TEX_H as f32 - 12.0,
-            8.0,
-            secondary.alpha((70.0 + focus * 110.0) as u8),
-            1.0,
-        );
-    }
     c.brackets(16.0, 11.0, primary.alpha(180));
     c.text(16.0, 8.0, 13.0, secondary, index);
     c.text(50.0, 7.0, 16.0, c.theme.text, title);
@@ -555,14 +545,14 @@ fn net_chart(c: &mut Canvas, ctx: &DrawCtx) -> Vec<Hotspot> {
 
 fn shortcuts(c: &mut Canvas) -> Vec<Hotspot> {
     let rows = [
-        ("LMB DRAG", "ORBIT ALL AXES"),
-        ("WHEEL", "ZOOM"),
-        ("RMB DRAG", "PAN"),
-        ("R", "RESET VIEW"),
-        ("1-5", "THEME PRESET"),
-        ("6", "CUSTOM HUE"),
-        ("HOVER", "FOCUS + FROST"),
-        ("M", "UI SOUND"),
+        ("ALT+LMB", "ORBIT"),
+        ("CTRL+LMB", "ROLL"),
+        ("MMB", "PAN"),
+        ("WHEEL", "ZOOM TO CURSOR"),
+        ("RMB HOLD", "FLY  WASD QE"),
+        ("F / R", "FRAME / RESET"),
+        ("1-6 / M", "THEME / SOUND"),
+        ("F3", "FPS COUNTER"),
         ("ESC", "QUIT"),
     ];
     for (i, (k, v)) in rows.iter().enumerate() {

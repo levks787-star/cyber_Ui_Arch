@@ -27,6 +27,7 @@ impl Hud {
         demo: bool,
         hovering: bool,
         sound_on: bool,
+        fps: Option<f32>,
     ) -> Self {
         canvas.clear(theme::Rgba::new(0, 0, 0, 0));
         let w = canvas.w as f32;
@@ -40,6 +41,9 @@ impl Hud {
         }
         if hovering {
             canvas.text(460.0, 18.0, 11.0, canvas.theme.primary, "FOCUS");
+        }
+        if let Some(fps) = fps {
+            canvas.text(22.0, 40.0, 14.0, canvas.theme.primary, &format!("FPS {fps:.0}"));
         }
 
         let mut hits = Vec::new();
@@ -99,7 +103,7 @@ impl Hud {
             rect: UiRect { x: sx, y: sy, w: 78.0, h: 22.0 },
             action: HudAction::Sound,
         });
-        canvas.text(112.0, canvas.h as f32 - 32.0, 11.0, canvas.theme.dim, "DRAG ORBIT   WHEEL ZOOM   RMB PAN   R RESET   M SOUND   1-5 THEME");
+        canvas.text(112.0, canvas.h as f32 - 32.0, 11.0, canvas.theme.dim, "ALT+LMB ORBIT   MMB PAN   RMB FLY   WHEEL ZOOM   F FRAME   R RESET   F3 FPS");
         Self { hits }
     }
 }

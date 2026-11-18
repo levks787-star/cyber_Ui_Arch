@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Arch Control Center
+GenericName=Панель управления
+Comment=Трёхмерный центр управления Arch Linux
+Exec=arch-control-center
+Terminal=false
+Categories=System;Settings;Monitor;
+Keywords=arch;control;monitor;hyprland;system;
+StartupWMClass=arch-control-center
+StartupNotify=false
