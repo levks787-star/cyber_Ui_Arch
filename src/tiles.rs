@@ -140,20 +140,18 @@ fn chrome(c: &mut Canvas, index: &str, title: &str, focus: f32) {
     c.clear(c.theme.panel);
     let primary = c.theme.primary;
     let secondary = c.theme.secondary;
-    c.fill_rect(0.0, 0.0, TEX_W as f32, 2.0, primary.alpha((50.0 + focus * 180.0) as u8));
-    let border = c.theme.line.mix(primary, focus);
-    c.stroke_rect(0.5, 0.5, TEX_W as f32 - 1.0, TEX_H as f32 - 1.0, border, 1.0);
     if focus > 0.08 {
-        c.stroke_rect(
-            3.0,
-            3.0,
-            TEX_W as f32 - 6.0,
-            TEX_H as f32 - 6.0,
-            secondary.alpha((focus * 220.0) as u8),
-            1.1,
+        c.stroke_round(
+            6.0,
+            6.0,
+            TEX_W as f32 - 12.0,
+            TEX_H as f32 - 12.0,
+            8.0,
+            secondary.alpha((70.0 + focus * 110.0) as u8),
+            1.0,
         );
     }
-    c.brackets(7.0, 12.0, primary.alpha(210));
+    c.brackets(16.0, 11.0, primary.alpha(180));
     c.text(16.0, 8.0, 13.0, secondary, index);
     c.text(50.0, 7.0, 16.0, c.theme.text, title);
     c.dots(16.0, 30.0, TEX_W as f32 - 32.0, c.theme.dim.alpha(170));
@@ -563,11 +561,12 @@ fn shortcuts(c: &mut Canvas) -> Vec<Hotspot> {
         ("R", "RESET VIEW"),
         ("1-5", "THEME PRESET"),
         ("6", "CUSTOM HUE"),
-        ("HOVER", "FOCUS + BLUR"),
+        ("HOVER", "FOCUS + FROST"),
+        ("M", "UI SOUND"),
         ("ESC", "QUIT"),
     ];
     for (i, (k, v)) in rows.iter().enumerate() {
-        let y = 42.0 + i as f32 * 26.0;
+        let y = 40.0 + i as f32 * 22.0;
         c.text(18.0, y, 12.0, c.theme.primary, k);
         c.text(150.0, y, 12.0, c.theme.text, v);
     }
@@ -575,8 +574,9 @@ fn shortcuts(c: &mut Canvas) -> Vec<Hotspot> {
 }
 
 fn button(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, label: &str, active: bool) -> UiRect {
-    c.fill_rect(x, y, w, h, c.theme.panel2);
-    c.stroke_rect(x, y, w, h, if active { c.theme.primary } else { c.theme.line }, 1.2);
+    c.fill_round(x, y, w, h, 4.0, c.theme.panel2);
+    let outline = if active { 150 } else { 112 };
+    c.stroke_round(x, y, w, h, 4.0, c.theme.primary.alpha(outline), 1.0);
     c.text_fit(x + 10.0, y + (h - 14.0) * 0.5, 13.0, c.theme.text, label, w - 20.0);
     UiRect { x, y, w, h }
 }

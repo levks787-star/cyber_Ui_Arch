@@ -2,10 +2,22 @@ use crate::theme::ThemeId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn default_sound() -> bool {
+    true
+}
+
+fn default_sound_volume() -> f32 {
+    0.55
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub theme: ThemeId,
     pub custom_hue: f32,
+    #[serde(default = "default_sound")]
+    pub sound: bool,
+    #[serde(default = "default_sound_volume")]
+    pub sound_volume: f32,
 }
 
 impl Default for Config {
@@ -13,6 +25,8 @@ impl Default for Config {
         Self {
             theme: ThemeId::Neon,
             custom_hue: 186.0,
+            sound: true,
+            sound_volume: default_sound_volume(),
         }
     }
 }
@@ -45,6 +59,7 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut cfg: Self = toml::from_str(text).map_err(|e| e.to_string())?;
         cfg.custom_hue = cfg.custom_hue.rem_euclid(360.0);
+        cfg.sound_volume = cfg.sound_volume.clamp(0.0, 1.0);
         Ok(cfg)
     }
 
@@ -79,5 +94,7 @@ mod tests {
         let text = toml::to_string(&cfg).unwrap();
         let again = Config::parse(&text).unwrap();
         assert_eq!(again.theme, ThemeId::Acid);
+        assert!(again.sound);
+        assert!((again.sound_volume - 0.55).abs() < 0.001);
     }
 }

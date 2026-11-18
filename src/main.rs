@@ -1,3 +1,4 @@
+mod audio;
 mod backends;
 mod camera;
 mod config;
@@ -9,6 +10,7 @@ mod system;
 mod theme;
 mod tiles;
 
+use audio::{Audio, Sfx};
 use camera::{damp, Orbit};
 use clap::Parser;
 use config::Config;
@@ -87,6 +89,12 @@ struct App {
     frames: u32,
     fps_at: Instant,
     size: (u32, u32),
+    audio: Audio,
+    hover_tile: Option<usize>,
+    focus_sent: Option<usize>,
+    last_hover_sfx: Instant,
+    last_slider_sfx: Instant,
+    blur_scratch: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -133,6 +141,8 @@ impl App {
         let theme_id = config.theme;
         let hue = config.custom_hue;
         let theme = colors(theme_id, hue);
+        let audio = Audio::start(config.sound, config.sound_volume);
+        audio.play(Sfx::Start);
         let n = catalog().len();
         let hist = if args.demo || showcase { Hist::seed_demo() } else { Hist::new() };
         Self {
@@ -173,6 +183,12 @@ impl App {
             frames: 0,
             fps_at: Instant::now(),
             size: (1, 1),
+            audio,
+            hover_tile: None,
+            focus_sent: None,
+            last_hover_sfx: Instant::now(),
+            last_slider_sfx: Instant::now(),
+            blur_scratch: Vec::new(),
         }
     }
 
@@ -223,6 +239,7 @@ impl App {
             let target = if self.hovered() == Some(i) { 1.0 } else { 0.0 };
             self.hover[i] = damp(self.hover[i], target, 10.0, dt);
         }
+        self.ui_sounds();
 
         self.tile_canvas.theme = self.theme;
         let drawn = chrono::Local::now();
@@ -237,6 +254,12 @@ impl App {
             };
             self.hotspots[i] = tiles::draw(&mut self.tile_canvas, spec, &ctx);
             self.tile_canvas.copy_rgba(&mut self.pixels[i]);
+            let hov = self.hover[i];
+            let frost_px = (max_h * 12.0 * (1.0 - hov)).clamp(0.0, 12.0);
+            if frost_px > 1.2 {
+                let radius = (frost_px * 0.65).round().clamp(2.0, 8.0) as i32;
+                paint::blur_rgba(&mut self.pixels[i], &mut self.blur_scratch, TEX_W, TEX_H, radius);
+            }
         }
 
         if let Some(window) = &self.window {
@@ -250,6 +273,7 @@ impl App {
                 self.hue,
                 snap.demo,
                 max_h > 0.45,
+                self.config.sound,
             );
             self.hud_hits = hud.hits;
             self.hud_canvas.copy_rgba(&mut self.hud_pixels);
@@ -273,12 +297,17 @@ impl App {
                     glam::Quat::IDENTITY,
                     pos,
                 );
-                let dim = max_h * 0.42;
-                let bright = (1.0 - dim + hov * dim).clamp(0.55, 1.25);
-                let blur = (max_h * 16.0 * (1.0 - hov)).clamp(0.0, 18.0);
+                let dim = max_h * 0.22;
+                let bright = (1.0 - dim + hov * dim).clamp(0.7, 1.15);
+                let frost = (max_h * (1.0 - hov)).clamp(0.0, 1.0);
+                let mut accent = self.theme.primary.to_f32();
+                accent[3] = 0.46;
+                let secondary = self.theme.secondary.to_f32();
                 draws.push(TileDraw {
                     model: model.to_cols_array_2d(),
-                    params: [blur, bright, hov, 0.0],
+                    params: [frost * 12.0, bright, hov, frost],
+                    accent,
+                    secondary,
                     pixels: &self.pixels[i],
                 });
             }
@@ -401,7 +430,11 @@ impl App {
         if let Some(hit) = self.hud_hits.iter().copied().find(|h| h.rect.contains(self.cursor[0], self.cursor[1])) {
             match hit.action {
                 HudAction::Theme(id) => self.set_theme(id, true),
-                HudAction::Reset => self.camera.request_reset(),
+                HudAction::Reset => {
+                    self.camera.request_reset();
+                    self.audio.play(Sfx::Reset);
+                }
+                HudAction::Sound => self.toggle_sound(),
                 HudAction::Hue => {
                     self.hue_from_cursor(hit.rect);
                     self.drag = Drag::Hue;
@@ -486,6 +519,9 @@ impl App {
                 let s = s.as_str();
                 if s.eq_ignore_ascii_case("r") {
                     self.camera.request_reset();
+                    self.audio.play(Sfx::Reset);
+                } else if s.eq_ignore_ascii_case("m") {
+                    self.toggle_sound();
                 }
                 if let Some(id) = ThemeId::from_key(s) {
                     self.set_theme(id, true);
@@ -496,6 +532,9 @@ impl App {
     }
 
     fn set_theme(&mut self, id: ThemeId, save: bool) {
+        if self.theme_id != id {
+            self.audio.play(Sfx::Theme);
+        }
         self.theme_id = id;
         self.theme_target = colors(id, self.hue);
         self.config.theme = id;
@@ -514,38 +553,50 @@ impl App {
                 let next = !cur;
                 self.overrides.wifi = Some((next, now));
                 self.sys.send(Command::Wifi(next));
+                self.toggle_sfx(next);
             }
             Action::Bluetooth => {
                 let cur = self.overrides.bt.map(|(v, _)| v).unwrap_or(snap.bluetooth.enabled);
                 let next = !cur;
                 self.overrides.bt = Some((next, now));
                 self.sys.send(Command::Bluetooth(next));
+                self.toggle_sfx(next);
             }
             Action::Mute => {
                 let cur = self.overrides.mute.map(|(v, _)| v).unwrap_or(snap.volume.muted);
                 let next = !cur;
                 self.overrides.mute = Some((next, now));
                 self.sys.send(Command::Mute(next));
+                self.toggle_sfx(!next);
             }
             Action::Dnd => {
                 let cur = self.overrides.dnd.map(|(v, _)| v).unwrap_or(snap.dnd.enabled);
                 let next = !cur;
                 self.overrides.dnd = Some((next, now));
                 self.sys.send(Command::Dnd(next));
+                self.toggle_sfx(next);
             }
             Action::Night => {
                 let cur = self.overrides.night.map(|(v, _)| v).unwrap_or(snap.night.enabled);
                 let next = !cur;
                 self.overrides.night = Some((next, now));
                 self.sys.send(Command::Night(next));
+                self.toggle_sfx(next);
             }
-            Action::Profile => self.sys.send(Command::CycleProfile),
+            Action::Profile => {
+                self.sys.send(Command::CycleProfile);
+                self.audio.play(Sfx::ToggleOn);
+            }
             Action::Volume | Action::Brightness => {}
         }
     }
 
     fn send_slider(&mut self, action: Action, value: f32) {
         let now = Instant::now();
+        if self.last_slider_sfx.elapsed() > Duration::from_millis(55) {
+            self.audio.play(Sfx::Slider);
+            self.last_slider_sfx = now;
+        }
         match action {
             Action::Volume => {
                 self.overrides.volume = Some((value, now));
@@ -557,6 +608,38 @@ impl App {
                 self.sys.send(Command::Brightness(value));
             }
             _ => {}
+        }
+    }
+
+    fn toggle_sfx(&self, on: bool) {
+        self.audio.play(if on { Sfx::ToggleOn } else { Sfx::ToggleOff });
+    }
+
+    fn toggle_sound(&mut self) {
+        self.config.sound = !self.config.sound;
+        self.audio.set_enabled(self.config.sound);
+        self.audio.set_volume(self.config.sound_volume);
+        self.config.save();
+        if self.config.sound {
+            self.audio.play(Sfx::ToggleOn);
+        }
+    }
+
+    fn ui_sounds(&mut self) {
+        let current = self.hovered();
+        if current != self.hover_tile {
+            if current.is_some() && self.last_hover_sfx.elapsed() > Duration::from_millis(75) {
+                self.audio.play(Sfx::Hover);
+                self.last_hover_sfx = Instant::now();
+            }
+            self.hover_tile = current;
+            self.focus_sent = None;
+        }
+        if let Some(i) = current {
+            if self.hover[i] > 0.62 && self.focus_sent != Some(i) {
+                self.audio.play(Sfx::Focus);
+                self.focus_sent = Some(i);
+            }
         }
     }
 

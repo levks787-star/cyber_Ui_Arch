@@ -1,7 +1,7 @@
 use crate::theme::Rgba;
 use fontdue::{Font, FontSettings, Metrics};
 use std::collections::HashMap;
-use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
 const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
@@ -86,6 +86,18 @@ impl Canvas {
         }
     }
 
+    pub fn fill_round(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgba) {
+        if let Some(path) = round_rect(x, y, w, h, radius) {
+            self.fill_path(&path, color);
+        }
+    }
+
+    pub fn stroke_round(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgba, width: f32) {
+        if let Some(path) = round_rect(x, y, w, h, radius) {
+            self.stroke_round_path(&path, color, width);
+        }
+    }
+
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: Rgba, width: f32) {
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y0);
@@ -113,6 +125,15 @@ impl Canvas {
         let mut stroke = Stroke::default();
         stroke.width = width.max(0.5);
         stroke.line_cap = cap;
+        self.pm
+            .stroke_path(path, &paint(color), &stroke, Transform::identity(), None);
+    }
+
+    fn stroke_round_path(&mut self, path: &Path, color: Rgba, width: f32) {
+        let mut stroke = Stroke::default();
+        stroke.width = width.max(0.75);
+        stroke.line_cap = LineCap::Round;
+        stroke.line_join = LineJoin::Round;
         self.pm
             .stroke_path(path, &paint(color), &stroke, Transform::identity(), None);
     }
@@ -334,15 +355,9 @@ impl Canvas {
     pub fn toggle(&mut self, x: f32, y: f32, on: bool, available: bool) -> UiRect {
         let w = 48.0;
         let h = 18.0;
-        let border = if !available {
-            self.theme.dim.alpha(120)
-        } else if on {
-            self.theme.primary
-        } else {
-            self.theme.line
-        };
-        self.fill_rect(x, y, w, h, self.theme.panel2);
-        self.stroke_rect(x, y, w, h, border, 1.2);
+        let radius = 4.0;
+        self.fill_round(x, y, w, h, radius, self.theme.panel2);
+        self.stroke_round(x, y, w, h, radius, self.theme.primary.alpha(112), 1.0);
         let kx = if on { x + w - h + 2.0 } else { x + 2.0 };
         let knob = if !available {
             self.theme.dim
@@ -351,15 +366,19 @@ impl Canvas {
         } else {
             self.theme.dim
         };
-        self.fill_rect(kx, y + 2.0, h - 4.0, h - 4.0, knob);
+        self.fill_round(kx, y + 2.0, h - 4.0, h - 4.0, 2.5, knob);
         UiRect { x, y, w, h }
     }
 
     pub fn slider(&mut self, x: f32, y: f32, w: f32, value: f32, color: Rgba) -> UiRect {
         let h = 8.0;
-        self.fill_rect(x, y, w, h, self.theme.panel2);
-        self.stroke_rect(x, y, w, h, self.theme.line.alpha(180), 1.0);
-        self.fill_rect(x, y, (w * value.clamp(0.0, 1.0)).max(1.0), h, color);
+        let radius = 3.0;
+        self.fill_round(x, y, w, h, radius, self.theme.panel2);
+        let fw = (w * value.clamp(0.0, 1.0)).max(0.0);
+        if fw > 1.0 {
+            self.fill_round(x, y, fw, h, radius.min(fw * 0.5), color);
+        }
+        self.stroke_round(x, y, w, h, radius, self.theme.primary.alpha(112), 1.0);
         for i in 0..11 {
             let tx = x + i as f32 * w / 10.0;
             self.fill_rect(tx, y - 4.0, 1.0, 3.0, self.theme.dim.alpha(160));
@@ -377,6 +396,86 @@ impl Canvas {
         out.resize(data.len(), 0);
         out.copy_from_slice(data);
         unpremultiply(out);
+    }
+}
+
+fn round_rect(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<Path> {
+    if w <= 0.5 || h <= 0.5 {
+        return None;
+    }
+    let r = radius.max(0.0).min(w * 0.5).min(h * 0.5);
+    let k = r * 0.55228475;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.cubic_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.cubic_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.cubic_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
+/// Two box passes via prefix sums. Soft and even, and the radius does not change the cost.
+pub fn blur_rgba(buf: &mut [u8], scratch: &mut Vec<u8>, w: u32, h: u32, radius: i32) {
+    let w = w as usize;
+    let h = h as usize;
+    let r = radius.max(0) as usize;
+    let n = w.saturating_mul(h).saturating_mul(4);
+    if r == 0 || buf.len() < n || w == 0 || h == 0 {
+        return;
+    }
+    scratch.resize(n, 0);
+    for _ in 0..2 {
+        box_axis(buf, scratch, w, h, r, true);
+        box_axis(scratch, buf, w, h, r, false);
+    }
+}
+
+fn box_axis(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
+    if horizontal {
+        let mut prefix = vec![[0u32; 4]; w + 1];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                for c in 0..4 {
+                    prefix[x + 1][c] = prefix[x][c] + src[i + c] as u32;
+                }
+            }
+            for x in 0..w {
+                let a = (x as i32 - r as i32).clamp(0, w as i32 - 1) as usize;
+                let b = (x as i32 + r as i32).clamp(0, w as i32 - 1) as usize;
+                let count = (b - a + 1) as u32;
+                let o = (y * w + x) * 4;
+                for c in 0..4 {
+                    dst[o + c] = ((prefix[b + 1][c] - prefix[a][c]) / count) as u8;
+                }
+            }
+            prefix[0] = [0; 4];
+        }
+    } else {
+        let mut prefix = vec![[0u32; 4]; h + 1];
+        for x in 0..w {
+            for y in 0..h {
+                let i = (y * w + x) * 4;
+                for c in 0..4 {
+                    prefix[y + 1][c] = prefix[y][c] + src[i + c] as u32;
+                }
+            }
+            for y in 0..h {
+                let a = (y as i32 - r as i32).clamp(0, h as i32 - 1) as usize;
+                let b = (y as i32 + r as i32).clamp(0, h as i32 - 1) as usize;
+                let count = (b - a + 1) as u32;
+                let o = (y * w + x) * 4;
+                for c in 0..4 {
+                    dst[o + c] = ((prefix[b + 1][c] - prefix[a][c]) / count) as u8;
+                }
+            }
+            prefix[0] = [0; 4];
+        }
     }
 }
 

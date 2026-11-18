@@ -4,6 +4,8 @@ struct Camera {
 struct TileU {
     model: mat4x4<f32>,
     params: vec4<f32>,
+    accent: vec4<f32>,
+    secondary: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -24,32 +26,37 @@ fn vs_tile(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>) -> TileVs {
     return out;
 }
 
+fn tile_dist(uv: vec2<f32>) -> f32 {
+    let dim = vec2<f32>(textureDimensions(tile_tex));
+    let p = uv * dim;
+    let radius = 13.0;
+    let half = dim * 0.5;
+    let q = abs(p - half) - (half - vec2<f32>(radius));
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+fn grain(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
 @fragment
 fn fs_tile(in: TileVs) -> @location(0) vec4<f32> {
-    let blur = tile.params.x;
+    let frost = tile.params.w;
     let bright = tile.params.y;
     let focus = tile.params.z;
-    var col: vec4<f32>;
-    if (blur < 0.25) {
-        col = textureSample(tile_tex, tile_samp, in.uv);
-    } else {
-        let dim = textureDimensions(tile_tex);
-        let texel = vec2<f32>(blur / f32(dim.x), blur / f32(dim.y));
-        var acc = vec4<f32>(0.0);
-        var wsum = 0.0;
-        for (var y: i32 = -2; y <= 2; y++) {
-            for (var x: i32 = -2; x <= 2; x++) {
-                let o = vec2<f32>(f32(x), f32(y));
-                let w = exp(-dot(o, o) * 0.22);
-                acc += textureSample(tile_tex, tile_samp, in.uv + o * texel) * w;
-                wsum += w;
-            }
-        }
-        col = acc / max(wsum, 0.0001);
-    }
-    col = vec4<f32>(col.rgb * bright, 1.0);
-    let edge = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
-    let glow = (1.0 - smoothstep(0.0, 0.07, edge)) * focus;
-    col = vec4<f32>(col.rgb + col.rgb * glow * 0.85, 1.0);
-    return col;
+    var rgb = textureSample(tile_tex, tile_samp, in.uv).rgb;
+    let luma = dot(rgb, vec3<f32>(0.22, 0.67, 0.11));
+    rgb = mix(rgb, vec3<f32>(luma), frost * 0.72);
+    rgb *= mix(1.0, 0.86, frost);
+    let px = floor(in.uv * vec2<f32>(textureDimensions(tile_tex)));
+    rgb += (grain(px) - 0.5) * frost * 0.055;
+    rgb *= bright;
+
+    let dist = tile_dist(in.uv);
+    let alpha = 1.0 - smoothstep(-0.15, 0.9, dist);
+    let ring = (1.0 - smoothstep(0.2, 1.15, abs(dist))) * step(dist, 0.55);
+    let edge_col = mix(tile.accent.rgb, tile.secondary.rgb, focus * 0.85);
+    let edge_a = mix(tile.accent.a, 0.95, focus);
+    rgb = mix(rgb, edge_col, ring * edge_a);
+    return vec4<f32>(rgb, alpha);
 }

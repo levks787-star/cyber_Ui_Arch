@@ -26,6 +26,8 @@ struct CameraUbo {
 struct TileUbo {
     model: [[f32; 4]; 4],
     params: [f32; 4],
+    accent: [f32; 4],
+    secondary: [f32; 4],
 }
 
 #[repr(C)]
@@ -44,6 +46,8 @@ struct CompUbo {
 pub struct TileDraw<'a> {
     pub model: [[f32; 4]; 4],
     pub params: [f32; 4],
+    pub accent: [f32; 4],
+    pub secondary: [f32; 4],
     pub pixels: &'a [u8],
 }
 
@@ -242,7 +246,10 @@ impl Gpu {
             fragment: Some(wgpu::FragmentState {
                 module: &tile_shader,
                 entry_point: Some("fs_tile"),
-                targets: &[Some(color_target(wgpu::TextureFormat::Rgba8Unorm, None))],
+                targets: &[Some(color_target(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::BlendState::ALPHA_BLENDING),
+                ))],
                 compilation_options: Default::default(),
             }),
             primitive: primitive(),
@@ -500,7 +507,12 @@ impl Gpu {
             self.queue.write_buffer(
                 &tile.uniform,
                 0,
-                bytemuck::bytes_of(&TileUbo { model: draw.model, params: draw.params }),
+                bytemuck::bytes_of(&TileUbo {
+                    model: draw.model,
+                    params: draw.params,
+                    accent: draw.accent,
+                    secondary: draw.secondary,
+                }),
             );
             if draw.pixels.len() == (TEX_W * TEX_H * 4) as usize {
                 self.queue.write_texture(

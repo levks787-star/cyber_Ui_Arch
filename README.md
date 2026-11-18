@@ -15,7 +15,7 @@
 Сборка на Arch:
 
 ```bash
-sudo pacman -S --needed base-devel rustup pkgconf mesa libxkbcommon wayland
+sudo pacman -S --needed base-devel rustup pkgconf mesa libxkbcommon wayland alsa-lib
 # libxkbcommon на Arch уже содержит libxkbcommon-x11.
 # На Debian/Ubuntu отдельно: libxkbcommon-x11-0 libxkbcommon-dev
 ```
@@ -77,13 +77,25 @@ cargo build --release
 | `R` или кнопка RESET | Плавно вернуть камеру |
 | `1`–`5` | Темы Neon, Acid, Ice, Blood, Mono |
 | `6` | Свой акцент (ползунок HUE справа сверху) |
+| `M` или кнопка SND | Звук интерфейса вкл/выкл |
 | `Esc` | Выход |
+
+Углы плиток, кнопок, тумблеров, образцов тем, ползунка HUE и RESET слегка скруглены. У каждого из них тонкая обводка цвета акцента. Фон под наведённой плиткой — матовое стекло: мягкое размытие, лёгкое зерно и приглушение цвета.
+
+Звуки интерфейса синтезируются в программе (это не записи меню PlayStation). Короткий стеклянный тик при наведении, лёгкий перезвон когда плитка выезжает, разные щелчки вкл/выкл, тихие тики ползунка, мерцание при смене темы, выдох при сбросе камеры и короткий аккорд на старте. Если аудиоустройства нет, звук просто молчит. Громкость и выключатель пишутся в конфиг:
+
+```toml
+sound = true
+sound_volume = 0.55
+```
 
 Тема пишется в `~/.config/arch-control-center/config.toml` (или `$XDG_CONFIG_HOME/arch-control-center/config.toml`):
 
 ```toml
 theme = "neon"
 custom_hue = 186.0
+sound = true
+sound_volume = 0.55
 ```
 
 Переключение темы интерполирует цвета. Ползунок HUE задаёт свой основной и дополнительный акцент.
@@ -100,6 +112,7 @@ custom_hue = 186.0
 - DND: `dunstctl` / `makoctl`. Ночной свет: `gammastep` / `redshift`.
 - Журнал: `journalctl -n 7`, если команда отвечает.
 - Если сервиса нет — подпись `UNAVAILABLE` и текст причины. `--demo` рисует полный набор и даёт кликать тумблеры локально.
+- Звук интерфейса: свой синтез на `rodio`, не блокирует кадр. Нет устройства — тишина. `M` или кнопка `SND` и поля `sound` / `sound_volume` в конфиге.
 
 ## Известные ограничения
 
