@@ -1,0 +1,4 @@
+JetBrains Mono
+Copyright (c) JetBrains s.r.o.
+Licensed under the SIL Open Font License, Version 1.1.
+https://github.com/JetBrains/JetBrainsMono

@@ -1,0 +1,37 @@
+[package]
+name = "arch-control-center"
+version = "0.2.0-beta.1"
+edition = "2021"
+rust-version = "1.85"
+description = "3D cyberpunk control center for Arch Linux"
+license = "MIT"
+publish = false
+
+[dependencies]
+winit = "=0.30.9"
+wgpu = "=23.0.1"
+pollster = "=0.4.0"
+bytemuck = { version = "=1.21.0", features = ["derive"] }
+glam = "=0.29.3"
+tiny-skia = "=0.11.4"
+fontdue = "=0.9.3"
+sysinfo = "=0.33.1"
+zbus = { version = "=4.4.0", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8.23"
+clap = { version = "=4.5.23", features = ["derive"] }
+chrono = "=0.4.39"
+png = "=0.17.16"
+log = "=0.4.22"
+env_logger = "=0.11.5"
+rodio = "=0.19.0"
+libc = "=0.2.191"
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16
+incremental = true
+
+[profile.dev]
+opt-level = 1
