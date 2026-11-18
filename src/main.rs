@@ -4,6 +4,7 @@ mod camera;
 mod config;
 mod gpu;
 mod hud;
+mod instance;
 mod model;
 mod paint;
 mod system;
@@ -31,7 +32,7 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, Fullscreen, Window, WindowId, WindowLevel};
 
 #[derive(Parser, Debug)]
 #[command(name = "arch-control-center", version, about = "3D control center for Arch Linux")]
@@ -45,6 +46,9 @@ struct Args {
     /// Save showcase PNGs into this directory and exit.
     #[arg(long)]
     shots: Option<PathBuf>,
+    /// Borderless fullscreen on top. A second launch closes the open overlay.
+    #[arg(long)]
+    overlay: bool,
     #[arg(long, default_value_t = 1440u32)]
     width: u32,
     #[arg(long, default_value_t = 900u32)]
@@ -95,6 +99,10 @@ struct App {
     last_hover_sfx: Instant,
     last_slider_sfx: Instant,
     blur_scratch: Vec<u8>,
+    overlay: bool,
+    intro: f32,
+    closing: bool,
+    overlay_lock: Option<instance::OverlayLock>,
 }
 
 #[derive(Clone, Copy)]
@@ -143,6 +151,12 @@ impl App {
         let theme = colors(theme_id, hue);
         let audio = Audio::start(config.sound, config.sound_volume);
         audio.play(Sfx::Start);
+        let overlay = (args.overlay || config.overlay) && args.shots.is_none();
+        let overlay_lock = if overlay {
+            Some(instance::OverlayLock::acquire_or_exit())
+        } else {
+            None
+        };
         let n = catalog().len();
         let hist = if args.demo || showcase { Hist::seed_demo() } else { Hist::new() };
         Self {
@@ -189,6 +203,10 @@ impl App {
             last_hover_sfx: Instant::now(),
             last_slider_sfx: Instant::now(),
             blur_scratch: Vec::new(),
+            overlay,
+            intro: if overlay { 0.0 } else { 1.0 },
+            closing: false,
+            overlay_lock,
         }
     }
 
@@ -240,6 +258,17 @@ impl App {
             self.hover[i] = damp(self.hover[i], target, 10.0, dt);
         }
         self.ui_sounds();
+        if self.overlay {
+            if self.overlay_lock.as_ref().is_some_and(|lock| lock.close_requested()) {
+                self.closing = true;
+            }
+            let target = if self.closing { 0.0 } else { 1.0 };
+            self.intro = damp(self.intro, target, 8.0, dt);
+            if self.closing && self.intro < 0.025 {
+                el.exit();
+                return;
+            }
+        }
 
         self.tile_canvas.theme = self.theme;
         let drawn = chrono::Local::now();
@@ -290,7 +319,7 @@ impl App {
             for i in 0..catalog().len() {
                 let base = grid_pos(i);
                 let hov = self.hover[i];
-                let scale = 1.0 + hov * 0.46;
+                let scale = (1.0 + hov * 0.46) * (0.92 + 0.08 * self.intro);
                 let pos = Vec3::new(base.x, base.y, base.z + hov * 1.65);
                 let model = Mat4::from_scale_rotation_translation(
                     Vec3::new(WORLD_W * scale, WORLD_H * scale, 1.0),
@@ -324,6 +353,8 @@ impl App {
                     &draws,
                     &self.hud_pixels,
                     capture,
+                    self.intro,
+                    self.overlay,
                 )
             };
             match result {
@@ -771,11 +802,37 @@ impl winit::application::ApplicationHandler for App {
         if self.gpu.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("ARCH LINUX // CONTROL CENTER")
-            .with_inner_size(LogicalSize::new(self.args.width, self.args.height))
-            .with_position(LogicalPosition::new(40.0, 30.0))
-            .with_min_inner_size(LogicalSize::new(960.0, 600.0));
+        let mut attrs = Window::default_attributes().with_title("ARCH LINUX // CONTROL CENTER");
+        attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+            attrs,
+            "arch-control-center",
+            "arch-control-center",
+        );
+        attrs = winit::platform::x11::WindowAttributesExtX11::with_name(
+            attrs,
+            "arch-control-center",
+            "arch-control-center",
+        );
+        if self.overlay {
+            if let Some(monitor) = event_loop
+                .primary_monitor()
+                .or_else(|| event_loop.available_monitors().next())
+            {
+                let size = monitor.size();
+                attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
+            }
+            attrs = attrs
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_resizable(false)
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_fullscreen(Some(Fullscreen::Borderless(None)));
+        } else {
+            attrs = attrs
+                .with_inner_size(LogicalSize::new(self.args.width, self.args.height))
+                .with_position(LogicalPosition::new(40.0, 30.0))
+                .with_min_inner_size(LogicalSize::new(960.0, 600.0));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => std::sync::Arc::new(w),
             Err(err) => {
@@ -803,7 +860,13 @@ impl winit::application::ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.overlay {
+                    self.closing = true;
+                } else {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.size = (size.width.max(1), size.height.max(1));
                 if let Some(gpu) = &mut self.gpu {
@@ -828,7 +891,11 @@ impl winit::application::ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed && !event.repeat {
                     if event.logical_key == Key::Named(NamedKey::Escape) {
-                        event_loop.exit();
+                        if self.overlay {
+                            self.closing = true;
+                        } else {
+                            event_loop.exit();
+                        }
                     } else {
                         self.on_key(event.logical_key);
                     }

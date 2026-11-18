@@ -68,6 +68,7 @@ pub struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     srgb: bool,
+    premul: bool,
     sampler: wgpu::Sampler,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
@@ -171,18 +172,27 @@ impl Gpu {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
+        let alpha_mode = [
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::Opaque,
+        ]
+        .into_iter()
+        .find(|mode| caps.alpha_modes.contains(mode))
+        .unwrap_or(caps.alpha_modes[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width,
             height,
             present_mode: present,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        log::info!("surface {format:?} {width}x{height} present {present:?}");
+        log::info!("surface {format:?} {alpha_mode:?} {width}x{height} present {present:?}");
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
@@ -422,6 +432,7 @@ impl Gpu {
             queue,
             config,
             srgb: format.is_srgb(),
+            premul: alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied,
             sampler,
             camera_buf,
             camera_bg,
@@ -493,6 +504,8 @@ impl Gpu {
         tiles: &[TileDraw],
         hud_pixels: &[u8],
         capture: bool,
+        intro: f32,
+        overlay: bool,
     ) -> Result<Option<Vec<u8>>, String> {
         if self.width == 0 || self.height == 0 {
             return Ok(None);
@@ -553,7 +566,19 @@ impl Gpu {
         let bh = (self.height / 4).max(1) as f32;
         self.queue.write_buffer(&self.blur_h_buf, 0, bytemuck::bytes_of(&CompUbo { params: [1.0 / bw, 0.0, 0.0, 0.0] }));
         self.queue.write_buffer(&self.blur_v_buf, 0, bytemuck::bytes_of(&CompUbo { params: [0.0, 1.0 / bh, 0.0, 0.0] }));
-        self.queue.write_buffer(&self.comp_buf, 0, bytemuck::bytes_of(&CompUbo { params: [0.0, 0.0, 0.95, 0.0] }));
+        let clear_a = if overlay { 0.0 } else { 1.0 };
+        self.queue.write_buffer(
+            &self.comp_buf,
+            0,
+            bytemuck::bytes_of(&CompUbo {
+                params: [
+                    intro.clamp(0.0, 1.0),
+                    if overlay { 1.0 } else { 0.0 },
+                    0.95,
+                    if self.premul { 1.0 } else { 0.0 },
+                ],
+            }),
+        );
         self.queue.write_buffer(
             &self.blit_buf,
             0,
@@ -581,7 +606,7 @@ impl Gpu {
                             r: clear[0] as f64,
                             g: clear[1] as f64,
                             b: clear[2] as f64,
-                            a: 1.0,
+                            a: clear_a,
                         }),
                         store: wgpu::StoreOp::Store,
                     },

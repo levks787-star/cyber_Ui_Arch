@@ -65,6 +65,51 @@ cargo build --release
 
 Нужен графический сеанс (X11 или Wayland).
 
+Оверлей поверх рабочего стола (без рамки, на весь экран, фон полупрозрачный, чтобы композитор мог его размыть):
+
+```bash
+arch-control-center --overlay
+# или в конфиге: overlay = true
+```
+
+Повторный запуск с `--overlay` (или с `overlay = true`) закрывает уже открытую панель. `Esc` тоже закрывает, с плавным затуханием. Wayland `app_id` и класс X11 окна — `arch-control-center`.
+
+## Hyprland
+
+Готовый фрагмент для `~/.config/hypr/hyprland.conf`. `SUPER+D` открывает панель и тем же нажатием закрывает её.
+
+```
+bind = SUPER, D, exec, arch-control-center --demo --overlay
+# уберите --demo, когда нужны живые датчики:
+# bind = SUPER, D, exec, arch-control-center --overlay
+
+windowrulev2 = float, class:^(arch-control-center)$
+windowrulev2 = fullscreen, class:^(arch-control-center)$
+windowrulev2 = noborder, class:^(arch-control-center)$
+windowrulev2 = noshadow, class:^(arch-control-center)$
+windowrulev2 = noanim, class:^(arch-control-center)$
+windowrulev2 = pin, class:^(arch-control-center)$
+```
+
+`noanim` отключает анимацию самого Hyprland: появление и уход рисует приложение. Окно — обычный toplevel (winit), не слой `zwlr_layer_shell`, поэтому `layerrule` на него не вешается. Размытие рабочего стола за полупрозрачным окном включает общий blur:
+
+```
+decoration {
+    blur {
+        enabled = true
+        size = 8
+        passes = 2
+        xray = false
+    }
+}
+```
+
+Если панель когда-нибудь окажется в layer-shell с этим именем, правило такое:
+
+```
+layerrule = blur, ^(arch-control-center)$
+```
+
 ## Управление
 
 | Ввод | Действие |
@@ -78,7 +123,7 @@ cargo build --release
 | `1`–`5` | Темы Neon, Acid, Ice, Blood, Mono |
 | `6` | Свой акцент (ползунок HUE справа сверху) |
 | `M` или кнопка SND | Звук интерфейса вкл/выкл |
-| `Esc` | Выход |
+| `Esc` | Выход. В оверлее — плавное закрытие |
 
 Углы плиток, кнопок, тумблеров, образцов тем, ползунка HUE и RESET слегка скруглены. У каждого из них тонкая обводка цвета акцента. Фон под наведённой плиткой — матовое стекло: мягкое размытие, лёгкое зерно и приглушение цвета.
 
@@ -96,6 +141,7 @@ theme = "neon"
 custom_hue = 186.0
 sound = true
 sound_volume = 0.55
+overlay = false
 ```
 
 Переключение темы интерполирует цвета. Ползунок HUE задаёт свой основной и дополнительный акцент.

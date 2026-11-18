@@ -18,6 +18,9 @@ pub struct Config {
     pub sound: bool,
     #[serde(default = "default_sound_volume")]
     pub sound_volume: f32,
+    /// Open borderless fullscreen. A second launch closes the running overlay.
+    #[serde(default)]
+    pub overlay: bool,
 }
 
 impl Default for Config {
@@ -27,6 +30,7 @@ impl Default for Config {
             custom_hue: 186.0,
             sound: true,
             sound_volume: default_sound_volume(),
+            overlay: false,
         }
     }
 }

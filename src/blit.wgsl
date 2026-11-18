@@ -32,5 +32,5 @@ fn fs_blit(in: FullVs) -> @location(0) vec4<f32> {
     if (comp.params.w > 0.5) {
         rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
     }
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(rgb, c.a);
 }

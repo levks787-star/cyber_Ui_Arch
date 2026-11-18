@@ -40,5 +40,14 @@ fn fs_composite(in: FullVs) -> @location(0) vec4<f32> {
     rgb *= scan;
     let hud = textureSample(hud_tex, hud_samp, in.uv);
     rgb = mix(rgb, hud.rgb, hud.a);
-    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let intro = comp.params.x;
+    let overlay = comp.params.y;
+    let veil = 0.48 * overlay * intro;
+    let faded = max(scene.a, veil) * intro;
+    let alpha = mix(1.0, faded, step(0.5, overlay));
+    if (comp.params.w > 0.5) {
+        rgb *= alpha;
+    }
+    return vec4<f32>(rgb, alpha);
 }
