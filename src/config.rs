@@ -21,6 +21,8 @@ pub struct Config {
     /// Open borderless fullscreen. A second launch closes the running overlay.
     #[serde(default)]
     pub overlay: bool,
+    #[serde(default)]
+    pub shell: ShellSettings,
 }
 
 impl Default for Config {
@@ -31,6 +33,102 @@ impl Default for Config {
             sound: true,
             sound_volume: default_sound_volume(),
             overlay: false,
+            shell: ShellSettings::default(),
+        }
+    }
+}
+
+fn default_radius() -> f32 {
+    16.0
+}
+fn default_opacity() -> f32 {
+    0.92
+}
+fn default_font() -> String {
+    "JetBrains Mono".into()
+}
+fn default_palette() -> String {
+    "cyberpunk".into()
+}
+fn default_scale() -> f32 {
+    1.0
+}
+fn default_break() -> u32 {
+    45
+}
+fn default_shot_dir() -> String {
+    "~/Pictures".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserTheme {
+    pub name: String,
+    pub swatches: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShellSettings {
+    #[serde(default = "default_radius")]
+    pub corner_radius: f32,
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub wallpaper_blur: bool,
+    /// Liquid-glass sheen instead of a matte dim, when the wallpaper backdrop is on.
+    #[serde(default)]
+    pub liquid_glass: bool,
+    #[serde(default = "default_font")]
+    pub font_name: String,
+    #[serde(default = "default_palette")]
+    pub palette: String,
+    #[serde(default)]
+    pub custom_themes: Vec<UserTheme>,
+    #[serde(default)]
+    pub pinned: Vec<String>,
+    #[serde(default)]
+    pub wallpaper: String,
+    #[serde(default = "default_scale")]
+    pub ui_scale: f32,
+    #[serde(default)]
+    pub dock_autohide: bool,
+    #[serde(default = "default_true")]
+    pub panel_clock: bool,
+    #[serde(default = "default_true")]
+    pub osd: bool,
+    #[serde(default = "default_true")]
+    pub notifications: bool,
+    #[serde(default = "default_shot_dir")]
+    pub screenshot_dir: String,
+    #[serde(default = "default_break")]
+    pub wellbeing_break_min: u32,
+    #[serde(default)]
+    pub gtk_theme: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ShellSettings {
+    fn default() -> Self {
+        Self {
+            corner_radius: default_radius(),
+            opacity: default_opacity(),
+            wallpaper_blur: false,
+            liquid_glass: false,
+            font_name: default_font(),
+            palette: default_palette(),
+            custom_themes: Vec::new(),
+            pinned: Vec::new(),
+            wallpaper: String::new(),
+            ui_scale: default_scale(),
+            dock_autohide: false,
+            panel_clock: true,
+            osd: true,
+            notifications: true,
+            screenshot_dir: default_shot_dir(),
+            wellbeing_break_min: default_break(),
+            gtk_theme: String::new(),
         }
     }
 }

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Arch Shell
+GenericName=Оболочка
+Comment=Док, лаунчер и настройки поверх Hyprland
+Exec=arch-control-center --shell
+Terminal=false
+Categories=System;Settings;
+Keywords=arch;hyprland;dock;launcher;shell;
+StartupWMClass=arch-shell
+StartupNotify=false

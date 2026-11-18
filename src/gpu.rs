@@ -1588,3 +1588,177 @@ impl BufferInit for wgpu::Device {
         DeviceExt::create_buffer_init(self, desc)
     }
 }
+
+/// Uploads a CPU pixmap to a window. Used by the dock, launcher, and settings.
+pub struct FlatGpu {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    layout: wgpu::BindGroupLayout,
+    uniform: wgpu::Buffer,
+    texture: Option<OwnedTex>,
+    bind: Option<wgpu::BindGroup>,
+    width: u32,
+    height: u32,
+    srgb: bool,
+}
+
+impl FlatGpu {
+    pub fn new(window: Arc<Window>, opts: GpuOptions) -> Result<Self, String> {
+        let boot = boot_gpu(&window, opts)?;
+        let sampler = boot.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("flat"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let layout = tex_layout(&boot.device, true);
+        let module = shader(&boot.device, "flat-blit", include_str!("blit.wgsl"));
+        let pipeline = fullscreen_pipeline(
+            &boot.device,
+            &layout,
+            &module,
+            "vs_full",
+            "fs_blit",
+            boot.config.format,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
+        let uniform = boot.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flat-ubo"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let srgb = boot.config.format.is_srgb();
+        Ok(Self {
+            surface: boot.surface,
+            device: boot.device,
+            queue: boot.queue,
+            config: boot.config,
+            pipeline,
+            sampler,
+            layout,
+            uniform,
+            texture: None,
+            bind: None,
+            width: 0,
+            height: 0,
+            srgb,
+        })
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if width == self.config.width && height == self.config.height && self.texture.is_some() {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.texture = None;
+        self.bind = None;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    pub fn present(&mut self, rgba: &[u8], width: u32, height: u32) -> Result<(), String> {
+        let width = width.max(1);
+        let height = height.max(1);
+        self.resize(width, height);
+        if self.width != width || self.height != height || self.texture.is_none() {
+            let texture = color_tex(
+                &self.device,
+                width,
+                height,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            );
+            let bind = bind_tex(&self.device, &self.layout, &texture.view, &self.sampler, Some(&self.uniform));
+            self.texture = Some(texture);
+            self.bind = Some(bind);
+            self.width = width;
+            self.height = height;
+        }
+        let row_bytes = width * 4;
+        let padded = (row_bytes + 255) & !255;
+        let upload = if padded == row_bytes && rgba.len() >= (row_bytes * height) as usize {
+            rgba[..(row_bytes * height) as usize].to_vec()
+        } else {
+            let mut packed = vec![0u8; (padded * height) as usize];
+            for y in 0..height as usize {
+                let src = y * width as usize * 4;
+                let dst = y * padded as usize;
+                let n = (width as usize * 4).min(rgba.len().saturating_sub(src));
+                if n == 0 {
+                    break;
+                }
+                packed[dst..dst + n].copy_from_slice(&rgba[src..src + n]);
+            }
+            packed
+        };
+        let Some(texture) = self.texture.as_ref() else {
+            return Ok(());
+        };
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &upload,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&[0.0_f32, 0.0, 0.0, if self.srgb { 1.0 } else { 0.0 }]),
+        );
+        let frame = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            Err(err) => return Err(format!("surface: {err}")),
+        };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("flat") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("flat"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            if let Some(bind) = &self.bind {
+                pass.set_bind_group(0, bind, &[]);
+            }
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+}

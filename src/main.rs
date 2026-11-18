@@ -2,12 +2,16 @@ mod audio;
 mod backends;
 mod camera;
 mod config;
+mod desktop;
 mod detach;
 mod gpu;
 mod hud;
+mod hypr;
 mod instance;
 mod model;
 mod paint;
+mod palette;
+mod shell;
 mod system;
 mod theme;
 mod tiles;
@@ -86,6 +90,21 @@ struct Args {
     /// Keep the process attached to the terminal. By default it detaches and logs to the cache file.
     #[arg(long, short = 'f')]
     foreground: bool,
+    /// Left dock, launcher, and settings. The 3D center stays available as --center.
+    #[arg(long)]
+    shell: bool,
+    /// Open the app grid. With a running shell this toggles it.
+    #[arg(long)]
+    launcher: bool,
+    /// Open settings. With a running shell this toggles it.
+    #[arg(long)]
+    settings: bool,
+    /// Save dock, launcher, and settings PNGs and exit.
+    #[arg(long)]
+    shell_shots: Option<PathBuf>,
+    /// Open the 3D control center instead of the shell.
+    #[arg(long)]
+    center: bool,
     #[arg(long, default_value_t = 1440u32)]
     width: u32,
     #[arg(long, default_value_t = 900u32)]
@@ -1204,6 +1223,22 @@ fn main() {
         detach::detach();
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let shell_mode = (args.shell || args.launcher || args.settings || args.shell_shots.is_some())
+        && !args.center
+        && !args.demo
+        && !args.showcase
+        && args.shots.is_none();
+    if shell_mode {
+        shell::run(shell::ShellArgs {
+            launcher: args.launcher || args.shell_shots.is_some(),
+            settings: args.settings || args.shell_shots.is_some(),
+            shots: args.shell_shots.clone(),
+            backend: resolve_backend(args.backend),
+            software: args.software || env_flag("ACC_SOFTWARE"),
+            quality: args.quality.render(),
+        });
+        return;
+    }
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new(args);
     if let Err(err) = event_loop.run_app(&mut app) {

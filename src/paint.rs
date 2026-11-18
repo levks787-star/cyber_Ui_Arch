@@ -5,6 +5,11 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, S
 
 const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
+/// A little larger than the original tile type, snapped to the pixel grid.
+fn px_size(size: f32) -> f32 {
+    (size * 1.13).max(1.0)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct UiRect {
     pub x: f32,
@@ -164,8 +169,58 @@ impl Canvas {
         self.line(w - inset, h - inset, w - inset, h - inset - len, color, 1.1);
     }
 
+    pub fn load_font_bytes(&mut self, bytes: &[u8]) -> bool {
+        match Font::from_bytes(bytes, FontSettings::default()) {
+            Ok(font) => {
+                self.font = font;
+                self.cache.clear();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub fn pixels(&self) -> &[u8] {
+        self.pm.data()
+    }
+
+    pub fn blit_rgba(&mut self, dx: i32, dy: i32, dw: u32, dh: u32, src: &[u8], sw: u32, sh: u32) {
+        if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+            return;
+        }
+        let dest_w = self.w;
+        let dest_h = self.h;
+        let data = self.pm.data_mut();
+        for y in 0..dh {
+            for x in 0..dw {
+                let sx = (x * sw / dw).min(sw - 1);
+                let sy = (y * sh / dh).min(sh - 1);
+                let si = ((sy * sw + sx) * 4) as usize;
+                if si + 4 > src.len() {
+                    continue;
+                }
+                let a = src[si + 3];
+                if a < 12 {
+                    continue;
+                }
+                let px = dx + x as i32;
+                let py = dy + y as i32;
+                if px < 0 || py < 0 || px >= dest_w as i32 || py >= dest_h as i32 {
+                    continue;
+                }
+                let di = ((py as u32 * dest_w + px as u32) * 4) as usize;
+                let inv = 255 - a as u16;
+                for c in 0..3 {
+                    data[di + c] = ((src[si + c] as u16 * a as u16 + data[di + c] as u16 * inv) / 255) as u8;
+                }
+                data[di + 3] = 255;
+            }
+        }
+    }
+
     pub fn text(&mut self, x: f32, y: f32, size: f32, color: Rgba, text: &str) {
-        let baseline = y + size * 0.80;
+        let size = px_size(size);
+        let baseline = (y + size * 0.80).round();
         let mut pen = x;
         for ch in text.chars() {
             let key = (ch, (size * 10.0) as u16);
@@ -174,7 +229,7 @@ impl Canvas {
                 self.cache.insert(key, Glyph { metrics, bitmap });
             }
             let glyph = self.cache.get(&key).unwrap();
-            let gx = pen as i32 + glyph.metrics.xmin;
+            let gx = pen.round() as i32 + glyph.metrics.xmin;
             let gy = baseline as i32 - glyph.metrics.ymin - glyph.metrics.height as i32;
             blit(
                 self.pm.data_mut(),
@@ -192,6 +247,7 @@ impl Canvas {
     }
 
     pub fn measure(&mut self, text: &str, size: f32) -> f32 {
+        let size = px_size(size);
         let mut w = 0.0;
         for ch in text.chars() {
             let key = (ch, (size * 10.0) as u16);
