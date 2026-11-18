@@ -132,14 +132,14 @@ pub fn hsv(h: f32, s: f32, v: f32) -> Rgba {
 
 fn base(panel_tint: Rgba, primary: Rgba, secondary: Rgba) -> ThemeColors {
     ThemeColors {
-        bg: Rgba::new(4, 6, 10, 255),
+        bg: Rgba::new(3, 5, 8, 255),
         panel: Rgba::new(
-            10 + panel_tint.r / 18,
-            12 + panel_tint.g / 18,
-            18 + panel_tint.b / 18,
+            14 + panel_tint.r / 14,
+            16 + panel_tint.g / 14,
+            24 + panel_tint.b / 14,
             255,
         ),
-        panel2: Rgba::new(6, 8, 12, 255),
+        panel2: Rgba::new(8, 12, 18, 255),
         line: Rgba::new(48, 64, 78, 255),
         text: Rgba::new(226, 244, 248, 255),
         dim: Rgba::new(96, 122, 136, 255),

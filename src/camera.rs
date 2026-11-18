@@ -14,17 +14,17 @@ pub struct Orbit {
 
 impl Orbit {
     pub fn new() -> Self {
-        let pitch = Quat::from_rotation_x(-0.46);
-        let yaw = Quat::from_rotation_y(-0.38);
+        let pitch = Quat::from_rotation_x(-0.30);
+        let yaw = Quat::from_rotation_y(-0.22);
         let home_rot = yaw * pitch;
         Self {
             rotation: home_rot,
-            distance: 10.4,
-            target: Vec3::new(0.0, -0.15, 0.0),
+            distance: 7.6,
+            target: Vec3::new(0.0, 0.05, 0.0),
             ang_vel: Vec3::ZERO,
-            fov: 48_f32.to_radians(),
+            fov: 46_f32.to_radians(),
             home_rot,
-            home_dist: 10.4,
+            home_dist: 7.6,
             resetting: false,
         }
     }
@@ -96,7 +96,7 @@ impl Orbit {
             let t = 1.0 - (-5.0 * dt).exp();
             self.rotation = self.rotation.slerp(self.home_rot, t).normalize();
             self.distance += (self.home_dist - self.distance) * t;
-            let home_target = Vec3::new(0.0, -0.15, 0.0);
+            let home_target = Vec3::new(0.0, 0.05, 0.0);
             self.target += (home_target - self.target) * t;
             let delta = self.rotation.dot(self.home_rot).abs();
             if delta > 0.9995 && (self.distance - self.home_dist).abs() < 0.03 {
@@ -122,7 +122,7 @@ impl Orbit {
         if self.resetting {
             return;
         }
-        let q = Quat::from_axis_angle(Vec3::Y, 0.22 * dt);
+        let q = Quat::from_axis_angle(Vec3::Y, 0.05 * dt);
         self.rotation = (q * self.rotation).normalize();
     }
 }

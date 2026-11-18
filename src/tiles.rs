@@ -54,8 +54,8 @@ const CATALOG: [TileSpec; 20] = [
     TileSpec { index: "03", title: "MEMORY", kind: Kind::Memory },
     TileSpec { index: "04", title: "DISK", kind: Kind::Disk },
     TileSpec { index: "05", title: "WI-FI", kind: Kind::Wifi },
-    TileSpec { index: "06", title: "NETWORK", kind: Kind::Network },
-    TileSpec { index: "07", title: "BLUETOOTH", kind: Kind::Bluetooth },
+    TileSpec { index: "06", title: "BLUETOOTH", kind: Kind::Bluetooth },
+    TileSpec { index: "07", title: "NETWORK", kind: Kind::Network },
     TileSpec { index: "08", title: "AUDIO", kind: Kind::Audio },
     TileSpec { index: "09", title: "BRIGHTNESS", kind: Kind::Brightness },
     TileSpec { index: "10", title: "DISK I/O", kind: Kind::DiskIo },
@@ -154,8 +154,8 @@ fn chrome(c: &mut Canvas, index: &str, title: &str, focus: f32) {
         );
     }
     c.brackets(7.0, 12.0, primary.alpha(210));
-    c.text(16.0, 10.0, 11.0, secondary, index);
-    c.text(48.0, 9.0, 13.0, c.theme.text, title);
+    c.text(16.0, 8.0, 13.0, secondary, index);
+    c.text(50.0, 7.0, 16.0, c.theme.text, title);
     c.dots(16.0, 30.0, TEX_W as f32 - 32.0, c.theme.dim.alpha(170));
 }
 

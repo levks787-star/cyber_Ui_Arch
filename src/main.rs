@@ -204,13 +204,13 @@ impl App {
 
         if self.showcase && !self.user_control {
             self.camera.showcase_spin(dt);
-            self.force_hover = if (3.0..9.6).contains(&self.time) {
+            self.force_hover = if (1.4..7.4).contains(&self.time) {
                 Some(network_index())
             } else {
                 None
             };
-            if self.time > 6.5 && !self.switched_acid {
-                self.set_theme(ThemeId::Acid, true);
+            if self.time > 4.6 && !self.switched_acid {
+                self.set_theme(ThemeId::Acid, false);
                 self.switched_acid = true;
             }
         }
@@ -266,16 +266,16 @@ impl App {
             for i in 0..catalog().len() {
                 let base = grid_pos(i);
                 let hov = self.hover[i];
-                let scale = 1.0 + hov * 0.34;
-                let pos = Vec3::new(base.x, base.y, base.z + hov * 1.35);
+                let scale = 1.0 + hov * 0.46;
+                let pos = Vec3::new(base.x, base.y, base.z + hov * 1.65);
                 let model = Mat4::from_scale_rotation_translation(
                     Vec3::new(WORLD_W * scale, WORLD_H * scale, 1.0),
                     glam::Quat::IDENTITY,
                     pos,
                 );
-                let dim = max_h * 0.62;
-                let bright = (1.0 - dim + hov * dim).clamp(0.38, 1.2);
-                let blur = (max_h * 12.0 * (1.0 - hov)).clamp(0.0, 16.0);
+                let dim = max_h * 0.42;
+                let bright = (1.0 - dim + hov * dim).clamp(0.55, 1.25);
+                let blur = (max_h * 16.0 * (1.0 - hov)).clamp(0.0, 18.0);
                 draws.push(TileDraw {
                     model: model.to_cols_array_2d(),
                     params: [blur, bright, hov, 0.0],
@@ -331,6 +331,10 @@ impl App {
     }
 
     fn update_hover(&mut self) {
+        if self.shots.is_some() {
+            self.hover_idx = None;
+            return;
+        }
         if self.hud_hot() {
             self.hover_idx = None;
             return;
@@ -599,16 +603,16 @@ impl App {
         if self.shots.is_none() {
             return false;
         }
-        const PLAN: [f32; 3] = [2.5, 5.1, 8.3];
+        const PLAN: [f32; 3] = [0.7, 3.4, 6.4];
         PLAN.iter().enumerate().any(|(i, t)| !self.shot_done[i] && self.time >= *t)
     }
 
     fn save_shot(&mut self, rgba: &[u8]) {
         let Some(dir) = self.shots.clone() else { return };
         const PLAN: [(f32, &str); 3] = [
-            (2.5, "01-orbit.png"),
-            (5.1, "02-hover-neon.png"),
-            (8.3, "03-hover-acid.png"),
+            (0.7, "01-orbit.png"),
+            (3.4, "02-hover-neon.png"),
+            (6.4, "03-hover-acid.png"),
         ];
         let _ = std::fs::create_dir_all(&dir);
         for (i, (t, name)) in PLAN.iter().enumerate() {
@@ -630,8 +634,8 @@ fn pick(hover: &[f32], eye: Vec3, dir: Vec3) -> Option<(usize, f32, f32)> {
     for i in 0..catalog().len() {
         let base = grid_pos(i);
         let hov = hover.get(i).copied().unwrap_or(0.0);
-        let scale = 1.0 + hov * 0.34;
-        let pos = Vec3::new(base.x, base.y, base.z + hov * 1.35);
+        let scale = 1.0 + hov * 0.46;
+        let pos = Vec3::new(base.x, base.y, base.z + hov * 1.65);
         let model = Mat4::from_scale_rotation_translation(
             Vec3::new(WORLD_W * scale, WORLD_H * scale, 1.0),
             glam::Quat::IDENTITY,

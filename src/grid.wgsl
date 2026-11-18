@@ -31,7 +31,7 @@ fn fs_grid(in: GridVs) -> @location(0) vec4<f32> {
     let mx = abs(fract(in.world.x * scale * 0.2) - 0.5);
     let mz = abs(fract(in.world.z * scale * 0.2) - 0.5);
     let major = min(mx, mz);
-    let a = smoothstep(0.018, 0.0, line) * 0.55 + smoothstep(0.028, 0.0, major) * 0.9;
+    let a = smoothstep(0.018, 0.0, line) * 0.28 + smoothstep(0.028, 0.0, major) * 0.42;
     let dist = length(in.world.xz);
     let fade = exp(-dist * 0.055);
     let intensity = clamp(a * fade, 0.0, 1.0);

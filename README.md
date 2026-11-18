@@ -2,6 +2,12 @@
 
 Бета трёхмерного центра управления для Arch Linux: плотная панель из нумерованных плиток, которую можно свободно крутить в пространстве. Наведение выдвигает плитку к камере и размывает остальные. Неон, тонкая линейная графика, живые графики.
 
+![Сетка плиток](docs/screenshots/01-orbit.png)
+
+![Наведение на NETWORK: плитка впереди, фон размыт](docs/screenshots/02-hover-neon.png)
+
+![Тема Acid](docs/screenshots/03-hover-acid.png)
+
 Стек: Rust, **wgpu** и **winit**. Настоящая 3D-сцена, орбитальная камера, постобработка (bloom) и размытие фона в шейдере плитки. Bevy 0.20 требует Rust 1.97 и очень долгую сборку; wgpu даёт тот же класс картинки (вращение по всем осям, зум, hover, blur) и собирается предсказуемо.
 
 ## Зависимости
@@ -10,6 +16,8 @@
 
 ```bash
 sudo pacman -S --needed base-devel rustup pkgconf mesa libxkbcommon wayland
+# libxkbcommon на Arch уже содержит libxkbcommon-x11.
+# На Debian/Ubuntu отдельно: libxkbcommon-x11-0 libxkbcommon-dev
 ```
 
 Для аппаратного Vulkan — драйвер видеокарты, для виртуалки без GPU — программный растеризатор:
